@@ -726,7 +726,7 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   renderTabs();buildGrids();loadMonth();loadTarget();
   
   setInterval(()=>{saveNow()},60000);
-  setInterval(async()=>{if(_pullDone&&_cloudOK){try{const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main&select=data',{headers:_sbH});if(r.ok){const j=await r.json();if(j[0]&&j[0].data&&j[0].data._ts>_lastPullTs){_lastPullTs=j[0].data._ts;const d=j[0].data;Object.entries(d).forEach(([k,v])=>{if(k.startsWith('pb_'))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});buildGrids();loadMonth();loadTarget();renderTabs();$('syncBadge').textContent='🟢 Cập nhật';$('syncBadge').style.color='var(--grn)'}}}catch(e){}}},3000);
+  setInterval(async()=>{if(_pullDone&&_cloudOK){try{const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main&select=data',{headers:_sbH});if(r.ok){const j=await r.json();if(j[0]&&j[0].data&&j[0].data._ts>_lastPullTs){_lastPullTs=j[0].data._ts;const d=j[0].data;Object.entries(d).forEach(([k,v])=>{if(k.startsWith('pb_'))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});loadMonth();loadTarget();$('syncBadge').textContent='🟢 Cập nhật';$('syncBadge').style.color='var(--grn)'}}}catch(e){}}},3000);
   document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu')}});
   if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}});
 </script>
