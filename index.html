@@ -336,7 +336,9 @@ let _pullDone=false; // autoPush blocked until first autoPull completes
 function load(y,m){if(!_storageOK)return null;try{return JSON.parse(localStorage.getItem(SK(y,m)))||null}catch{return null}}
 function save(y,m,d){if(!_storageOK)return;try{localStorage.setItem(SK(y,m),JSON.stringify(d));showSaved()}catch(e){console.error('Save:',e)}}
 function showSaved(){const el=$('saveStatus');if(!el)return;el.style.opacity='1';clearTimeout(el._t);el._t=setTimeout(()=>{el.style.opacity='0'},1800)}
-function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
+function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats();debouncePush()},300)}
+let _pushTimer=null;
+function debouncePush(){if(!_pullDone)return;clearTimeout(_pushTimer);_pushTimer=setTimeout(()=>{autoPush()},5000)}
 
 // ═══ SUPABASE CLOUD SYNC ═══
 function getAllData(){const a={};for(let y=2026;y<=2030;y++){for(let m=0;m<12;m++){const d=load(y,m);if(d)a[SK(y,m)]=d}};
