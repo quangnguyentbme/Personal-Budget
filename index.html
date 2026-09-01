@@ -2,10 +2,6 @@
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Budget">
-<meta name="mobile-web-app-capable" content="yes">
-<link rel="apple-touch-icon" href="icon.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Personal Budget Tracker</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
@@ -335,14 +331,12 @@ let _saveTimer=null,_storageOK=true;
 try{localStorage.setItem('__t','1');localStorage.removeItem('__t')}catch{_storageOK=false}
 const _cloudOK=SUPABASE_URL.length>5&&SUPABASE_KEY.length>5;
 const _sbH={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Prefer':'return=minimal'};
-let _pullDone=false,_lastPullTs=0;
+let _pullDone=false; // autoPush blocked until first autoPull completes
 
 function load(y,m){if(!_storageOK)return null;try{return JSON.parse(localStorage.getItem(SK(y,m)))||null}catch{return null}}
 function save(y,m,d){if(!_storageOK)return;try{localStorage.setItem(SK(y,m),JSON.stringify(d));showSaved()}catch(e){console.error('Save:',e)}}
 function showSaved(){const el=$('saveStatus');if(!el)return;el.style.opacity='1';clearTimeout(el._t);el._t=setTimeout(()=>{el.style.opacity='0'},1800)}
-function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats();debouncePush()},300)}
-let _pushTimer=null;
-function debouncePush(){if(!_pullDone)return;clearTimeout(_pushTimer);_pushTimer=setTimeout(()=>{autoPush()},5000)}
+function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
 
 // ═══ SUPABASE CLOUD SYNC ═══
 function getAllData(){const a={};for(let y=2026;y<=2030;y++){for(let m=0;m<12;m++){const d=load(y,m);if(d)a[SK(y,m)]=d}};
@@ -453,7 +447,7 @@ function buildGrids(){
   document.querySelectorAll('.dc').forEach(el=>{
     el.addEventListener('input',()=>{debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats();if(_pullDone)autoPush()});
+    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats()});
     el.addEventListener('keydown',e=>{
       const item=el.dataset.item,day=+el.dataset.day;
       if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();fmtDayCell(el);saveNow();updateStats();const nx=$('d_'+item+'_'+(day+1));if(nx)nx.focus()}
@@ -466,7 +460,7 @@ function buildGrids(){
     if(el.id==='savTarget')return;
     el.addEventListener('input',()=>{fmtIncField(el);debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats();if(_pullDone)autoPush()})});
+    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats()})});
   highlightToday()}
 
 function fmtDayCell(el){const n=parseInt(el.value.replace(/\D/g,''))||0;el.value=n>0?n.toLocaleString('vi-VN'):'';el.classList.toggle('has-val',n>0)}
@@ -726,7 +720,6 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   renderTabs();buildGrids();loadMonth();loadTarget();
   
   setInterval(()=>{saveNow()},60000);
-  setInterval(async()=>{if(_pullDone&&_cloudOK){try{const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main&select=data',{headers:_sbH});if(r.ok){const j=await r.json();if(j[0]&&j[0].data&&j[0].data._ts>_lastPullTs){_lastPullTs=j[0].data._ts;const d=j[0].data;Object.entries(d).forEach(([k,v])=>{if(k.startsWith('pb_'))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});buildGrids();loadMonth();loadTarget();renderTabs();$('syncBadge').textContent='🟢 Cập nhật';$('syncBadge').style.color='var(--grn)'}}}catch(e){}},3000);
   document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu')}});
   if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}});
 </script>
