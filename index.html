@@ -340,9 +340,7 @@ let _pullDone=false,_lastPullTs=0;
 function load(y,m){if(!_storageOK)return null;try{return JSON.parse(localStorage.getItem(SK(y,m)))||null}catch{return null}}
 function save(y,m,d){if(!_storageOK)return;try{localStorage.setItem(SK(y,m),JSON.stringify(d));showSaved()}catch(e){console.error('Save:',e)}}
 function showSaved(){const el=$('saveStatus');if(!el)return;el.style.opacity='1';clearTimeout(el._t);el._t=setTimeout(()=>{el.style.opacity='0'},1800)}
-function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats();debouncePush()},300)}
-let _pushTimer=null;
-function debouncePush(){if(!_pullDone)return;clearTimeout(_pushTimer);_pushTimer=setTimeout(()=>{autoPush()},1000)}
+function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
 
 // ═══ SUPABASE CLOUD SYNC ═══
 function getAllData(){const a={};for(let y=2026;y<=2030;y++){for(let m=0;m<12;m++){const d=load(y,m);if(d)a[SK(y,m)]=d}};
@@ -726,7 +724,6 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   renderTabs();buildGrids();loadMonth();loadTarget();
   
   setInterval(()=>{saveNow()},60000);
-  setInterval(async()=>{if(_pullDone&&_cloudOK){try{const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main&select=data',{headers:_sbH});if(r.ok){const j=await r.json();if(j[0]&&j[0].data&&j[0].data._ts>_lastPullTs){_lastPullTs=j[0].data._ts;const d=j[0].data;Object.entries(d).forEach(([k,v])=>{if(k.startsWith('pb_'))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});$('syncBadge').textContent='🟢 Cập nhật';$('syncBadge').style.color='var(--grn)'}}}catch(e){}}},1000);
   document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu')}});
   if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}});
 </script>
