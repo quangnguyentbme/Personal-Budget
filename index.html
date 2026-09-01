@@ -2,9 +2,6 @@
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Budget">
-<link rel="apple-touch-icon" href="icon.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Personal Budget Tracker</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
@@ -334,6 +331,7 @@ let _saveTimer=null,_storageOK=true;
 try{localStorage.setItem('__t','1');localStorage.removeItem('__t')}catch{_storageOK=false}
 const _cloudOK=SUPABASE_URL.length>5&&SUPABASE_KEY.length>5;
 const _sbH={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Prefer':'return=minimal'};
+let _pullDone=false; // autoPush blocked until first autoPull completes
 
 function load(y,m){if(!_storageOK)return null;try{return JSON.parse(localStorage.getItem(SK(y,m)))||null}catch{return null}}
 function save(y,m,d){if(!_storageOK)return;try{localStorage.setItem(SK(y,m),JSON.stringify(d));showSaved()}catch(e){console.error('Save:',e)}}
@@ -352,24 +350,46 @@ async function autoPull(){
     if(!res.ok){$('syncBadge').textContent='🔴 Lỗi';$('syncBadge').style.color='var(--pnk)';return}
     const json=await res.json();if(!json[0]||!json[0].data||!json[0].data._ts)return;
     const data=json[0].data;
-    Object.entries(data).forEach(([k,v])=>{if(k.startsWith('pb_')){const ex=localStorage.getItem(k);if(!ex||ex==='{}'||ex==='null')localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))}});
+    // Always load cloud data (cloud is master)
+    Object.entries(data).forEach(([k,v])=>{if(k.startsWith('pb_'))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});
+    _pullDone=true;
     buildGrids();loadMonth();loadTarget();renderTabs();
     $('syncBadge').textContent='🟢 Đã đồng bộ';$('syncBadge').style.color='var(--grn)'
   }catch(e){$('syncBadge').textContent='🔴 Offline';$('syncBadge').style.color='var(--pnk)';console.error(e)}}
 
 function autoPush(){
-  if(!_cloudOK)return;saveNow();
+  if(!_cloudOK)return;
+  // NEVER push if pull hasn't completed — prevents overwriting cloud with empty local data
+  if(!_pullDone)return;
+  saveNow();
   const allData=getAllData();
-  if(Object.keys(allData).filter(k=>k.startsWith('pb_')).length===0)return;
+  const dataKeys=Object.keys(allData).filter(k=>k.startsWith('pb_'));
+  // Don't push if no real data
+  if(dataKeys.length===0)return;
+  // Check if there's any actual content (not just empty objects)
+  const hasContent=dataKeys.some(k=>{const v=allData[k];return v&&typeof v==='object'&&Object.keys(v).length>0&&(v.income||v.expenses)});
+  if(!hasContent)return;
   try{fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main',{method:'PATCH',keepalive:true,
     headers:_sbH,body:JSON.stringify({data:allData,updated_at:new Date().toISOString()})})}catch(e){console.error(e)}}
 
 async function manualSync(){
   if(!_cloudOK){toast('⚠ Chưa cấu hình');return}
   saveNow();toast('🔄 Đang đồng bộ...');
-  try{const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main',{method:'PATCH',
-    headers:_sbH,body:JSON.stringify({data:getAllData(),updated_at:new Date().toISOString()})});
-    if(r.ok){$('syncBadge').textContent='🟢 Đã đồng bộ';$('syncBadge').style.color='var(--grn)';toast('✓ Đã đồng bộ')}else{toast('⚠ Lỗi '+r.status)}}catch(e){toast('⚠ Offline')}}
+  try{
+    // Pull first to get latest
+    const res=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main&select=data',{headers:_sbH});
+    if(res.ok){const json=await res.json();if(json[0]&&json[0].data&&json[0].data._ts){
+      const cloud=json[0].data;
+      // Merge: cloud data fills gaps, local data wins for existing months
+      Object.entries(cloud).forEach(([k,v])=>{if(k.startsWith('pb_')&&!localStorage.getItem(k))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});
+      buildGrids();loadMonth();loadTarget();renderTabs()}}
+    // Then push merged data
+    saveNow();
+    const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main',{method:'PATCH',
+      headers:_sbH,body:JSON.stringify({data:getAllData(),updated_at:new Date().toISOString()})});
+    _pullDone=true;
+    if(r.ok){$('syncBadge').textContent='🟢 Đã đồng bộ';$('syncBadge').style.color='var(--grn)';toast('✓ Đã đồng bộ')}else{toast('⚠ Lỗi '+r.status)}
+  }catch(e){toast('⚠ Offline')}}
 
 // ═══ SAVINGS TARGET ═══
 function getTarget(){return parseFloat($('savTarget').value)||0}
