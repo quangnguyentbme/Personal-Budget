@@ -449,7 +449,7 @@ function buildGrids(){
   document.querySelectorAll('.dc').forEach(el=>{
     el.addEventListener('input',()=>{debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats()});
+    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats();if(_pullDone)autoPush()});
     el.addEventListener('keydown',e=>{
       const item=el.dataset.item,day=+el.dataset.day;
       if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();fmtDayCell(el);saveNow();updateStats();const nx=$('d_'+item+'_'+(day+1));if(nx)nx.focus()}
@@ -462,7 +462,7 @@ function buildGrids(){
     if(el.id==='savTarget')return;
     el.addEventListener('input',()=>{fmtIncField(el);debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats()})});
+    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats();if(_pullDone)autoPush()})});
   highlightToday()}
 
 function fmtDayCell(el){const n=parseInt(el.value.replace(/\D/g,''))||0;el.value=n>0?n.toLocaleString('vi-VN'):'';el.classList.toggle('has-val',n>0)}
