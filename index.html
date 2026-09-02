@@ -109,7 +109,7 @@ body{font-family:'Calibri',Arial,sans-serif;background:var(--bg);color:var(--t);
   <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--grn);opacity:0;transition:opacity .3s">✓ Đã lưu</span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span></p></div>
   <div class="hdr-act">
     <select class="yr-s" id="yrS"></select>
-    <button class="btn" style="background:var(--bbg);color:var(--blu);font-size:12px" onclick="manualSync()">☁ Đồng bộ</button>
+    <button class="btn" style="background:var(--bbg);color:var(--blu);font-size:12px" onclick="manualSync()">☁ Sync</button>
     <button class="btn btn-b" onclick="exportCSV()">↓ CSV</button>
     <button class="btn btn-o" onclick="exportHistory()">↓ History CSV</button>
     <button class="btn btn-o" onclick="copyMonth()">Sao chép tháng</button>
@@ -364,12 +364,12 @@ async function autoPull(){
     Object.entries(data).forEach(([k,v])=>{if(k.startsWith('pb_'))_mem[k]=(typeof v==='string'?v:JSON.stringify(v))});
     _pullDone=true;
     buildGrids();loadMonth();loadTarget();renderTabs();
-    $('syncBadge').textContent='🟢 Đã đồng bộ';$('syncBadge').style.color='var(--grn)'
+    $('syncBadge').textContent='🟢 Synced';$('syncBadge').style.color='var(--grn)'
   }catch(e){$('syncBadge').textContent='🔴 Offline';$('syncBadge').style.color='var(--pnk)';console.error(e)}}
 
 async function manualSync(){
   if(!_cloudOK){toast('⚠ Chưa cấu hình');return}
-  saveNow();toast('🔄 Đang đồng bộ...');
+  saveNow();toast('🔄 Syncing...');
   try{
     // Pull first to get latest
     const res=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main&select=data',{headers:_sbH});
@@ -720,7 +720,7 @@ async function exportHistory(){
 // ═══ INIT ═══
 // KHÔNG dùng localStorage. Data chỉ tồn tại trong RAM (biến _mem).
 // Đóng tab → mất hết. Mở lại → pull sạch từ cloud.
-// Chỉ khi user bấm ☁ Đồng bộ, data mới được PATCH lên cloud + sinh 1 dòng history.
+// Chỉ khi user bấm ☁ , data mới được PATCH lên cloud + sinh 1 dòng history.
 // Cơ chế này đảm bảo nhiều thiết bị access không loạn: cloud luôn là nguồn thật duy nhất.
 
 document.addEventListener('DOMContentLoaded',async ()=>{
@@ -732,8 +732,8 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   else if(_cloudOK){$('syncBadge').textContent='🟠 History chưa sẵn sàng';$('syncBadge').style.color='var(--org)'}
   renderTabs();buildGrids();loadMonth();loadTarget();
 
-  // Ctrl+S = shortcut lưu vào RAM (chưa lên cloud); muốn sync cloud phải bấm nút ☁ Đồng bộ
-  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu tạm (chưa lên cloud — bấm ☁ Đồng bộ để đẩy)')}});
+  // Ctrl+S = shortcut lưu vào RAM (chưa lên cloud); muốn sync cloud phải bấm nút ☁ 
+  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu tạm (chưa lên cloud — bấm ☁ Sync để đẩy)')}});
   if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}});
 </script>
 </body>
