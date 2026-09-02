@@ -109,13 +109,15 @@ body{font-family:'Calibri',Arial,sans-serif;background:var(--bg);color:var(--t);
 <div class="app" id="mainApp">
 
 <div class="hdr">
-  <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--t2);opacity:0;transition:opacity .3s"></span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span> <span style="font-size:9px;color:var(--t3)">· SYNC V4</span></p></div>
+  <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--t2);opacity:0;transition:opacity .3s"></span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span> <span style="font-size:9px;color:var(--t3)">· SYNC V6 · CLEAN</span></p></div>
   <div class="hdr-act">
     <select class="yr-s" id="yrS"></select>
     <button class="btn" style="background:var(--bbg);color:var(--blu);font-size:12px" onclick="manualSync()">☁ Đồng bộ</button>
     <button class="btn btn-b" onclick="exportCSV()">↓ CSV</button>
     <button class="btn btn-o" onclick="exportHistoryCSV()">↓ History CSV</button>
     <button class="btn btn-o" onclick="copyMonth()">Sao chép tháng</button>
+    <button class="btn" style="background:#fff3f0;color:#ff6b35;font-size:11px" onclick="deleteCurrentMonth()" title="Ghi dữ liệu rỗng cho tháng đang xem — lịch sử vẫn được lưu trong budget_history_records">🗑 Xóa tháng</button>
+    <button class="btn btn-p" onclick="resetLocalCache()" title="Xóa toàn bộ cache local rồi tải lại từ cloud (cloud là nguồn thật)">↻ Reset local</button>
   </div>
 </div>
 
@@ -343,7 +345,7 @@ const _META_DIRTY='__pb_dirty_keys',_META_VERS='__pb_cloud_versions';
 let _pullDone=false,_historyOK=false,_syncBusy=false,_lastCloudPullAt=0;
 let _conflictKeys=new Set(),_dirtyKeys=new Set(),_cloudVersions={};
 const _pushTimers=new Map(),_pushInFlight=new Map();
-const APP_BUILD='PB-SYNC-V4-20260902';
+const APP_BUILD='PB-SYNC-V6-20260902-CLEAN-SLATE';
 console.log(APP_BUILD);
 
 try{const x=JSON.parse(localStorage.getItem(_META_DIRTY)||'[]');if(Array.isArray(x))_dirtyKeys=new Set(x)}catch{}
@@ -380,9 +382,20 @@ function save(y,m,d){
   }catch(e){console.error('Save:',e);return false}
 }
 function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
-function stashRecovery(k,v,reason='cloud_newer'){try{localStorage.setItem('__pb_recovery_'+k,JSON.stringify({saved_at:new Date().toISOString(),reason,data:v}))}catch{}}
 
-// ═══ SUPABASE CLOUD SYNC · CLOUD CANONICAL + SAFE HISTORY ═══
+// ═══════════════════════════════════════════════════════════════════
+// SUPABASE CLOUD SYNC · CLEAN SLATE (V6)
+//
+// Nguyên tắc:
+//   1. Mọi write đi qua RPC budget_safe_save → trigger SQL tự log
+//      vào budget_history_records (action CREATE/UPDATE/DELETE).
+//   2. Cloud là nguồn thật (source of truth). Local là write-through cache.
+//   3. Optimistic concurrency: push mang theo expected_updated_at.
+//      Nếu cloud đã thay đổi (device khác chỉnh trước) → conflict.
+//      Xử lý conflict: fetch bản cloud mới nhất, ghi đè local. Đơn giản.
+//   4. Không có backup __pb_recovery_ nữa (bắt đầu sạch, không cần lo legacy).
+// ═══════════════════════════════════════════════════════════════════
+
 async function checkHistoryReady(){
   if(!_cloudOK)return false;
   try{
@@ -408,6 +421,7 @@ async function fetchCloudKey(k){
   return rows[0]||null
 }
 
+// Ghi 1 row từ cloud xuống local + đánh dấu clean (dirty=false)
 function writeCloudRowToLocal(row){
   const k=row.id;if(!isBudgetKey(k))return;
   localStorage.setItem(k,typeof row.data==='string'?row.data:JSON.stringify(row.data));
@@ -415,41 +429,29 @@ function writeCloudRowToLocal(row){
   clearDirty(k)
 }
 
-// Startup reconciliation:
-// - clean/stale local => cloud wins
-// - truly unsynced local based on the SAME cloud version => keep it and push it
-// - ambiguous/old conflict metadata => recovery copy + cloud wins
-function bootstrapCloudRows(rows){
-  const cloudMap=new Map(rows.filter(r=>isBudgetKey(r.id)).map(r=>[r.id,r]));
-  _conflictKeys.clear();
-  for(const [k,row] of cloudMap){
-    const local=localValueForKey(k),base=_cloudVersions[k]||null,dirty=_dirtyKeys.has(k),cloudVer=row.updated_at||null;
-    if(dirty&&base&&cloudVer===base){continue}
-    if(dirty&&local!==null&&!sameJson(local,row.data))stashRecovery(k,local,'startup_reconcile');
-    writeCloudRowToLocal(row)
-  }
-  // Local-only dirty keys are allowed to create a new cloud row.
-  for(const k of [..._dirtyKeys]){
-    if(!isBudgetKey(k))continue;
-    if(!cloudMap.has(k))setCloudVersion(k,null)
-  }
-  persistSyncMeta()
-}
-
-// Normal refresh. If cloud changed while local is dirty, cloud becomes canonical;
-// the unsynced local copy is preserved under __pb_recovery_<key> instead of freezing forever.
+// Reconcile local với cloud. Quy tắc:
+//   • Key dirty + cùng base version với cloud → local mới hơn, giữ local (sẽ push)
+//   • Còn lại → cloud thắng, ghi đè local
+// Return số key bị ghi đè (để hiển thị toast).
 function applyCloudRows(rows){
-  let reconciled=0;
-  _conflictKeys.clear();
+  let overwritten=0;
   for(const row of rows){
     const k=row.id;if(!isBudgetKey(k))continue;
-    const cloudVer=row.updated_at||null,base=_cloudVersions[k]||null,local=localValueForKey(k),dirty=_dirtyKeys.has(k);
+    const cloudVer=row.updated_at||null,base=_cloudVersions[k]||null,dirty=_dirtyKeys.has(k);
+    // Local dirty dựa trên cloud version hiện tại → local mới hơn, giữ lại
     if(dirty&&base&&cloudVer===base)continue;
-    if(dirty&&local!==null&&!sameJson(local,row.data)){stashRecovery(k,local,'cloud_newer');reconciled++}
+    const local=localValueForKey(k);
+    if(dirty&&local!==null&&!sameJson(local,row.data))overwritten++;
     writeCloudRowToLocal(row)
   }
+  // Dirty keys chưa có trên cloud → cho phép tạo mới (giữ dirty)
+  const cloudSet=new Set(rows.map(r=>r.id));
+  for(const k of [..._dirtyKeys]){
+    if(!isBudgetKey(k))continue;
+    if(!cloudSet.has(k))setCloudVersion(k,null)
+  }
   persistSyncMeta();
-  return reconciled
+  return overwritten
 }
 
 function scheduleCloudPush(k,delay=700){
@@ -459,15 +461,15 @@ function scheduleCloudPush(k,delay=700){
   _pushTimers.set(k,t)
 }
 
-async function resolveCloudConflict(k,localCopy){
+// Xử lý conflict: cloud đã thay đổi sau lần load gần nhất → fetch lại, cloud thắng.
+async function resolveCloudConflict(k){
   try{
-    if(localCopy!==null)stashRecovery(k,localCopy,'rpc_conflict');
     const row=await fetchCloudKey(k);
     if(row){writeCloudRowToLocal(row)}
     else{setCloudVersion(k,null);clearDirty(k)}
-    _conflictKeys.delete(k);persistSyncMeta();refreshSyncBadge();
+    refreshSyncBadge();
     showSaved('↻ Cloud mới hơn · đã tải bản cloud','var(--org)');
-    toast('↻ Đã lấy bản mới nhất từ cloud. Bản local cũ vẫn có Recovery.');
+    toast('↻ Device khác đã chỉnh trước. Đã lấy bản mới nhất từ cloud.');
     if(curView==='month'&&k===SK(curY,curM)){loadMonth();loadTarget()}
     return true
   }catch(e){console.error(e);return false}
@@ -487,7 +489,7 @@ async function _doPushDirtyKey(k,keepalive=false){
     });
     if(!r.ok){console.error('Cloud save',r.status,await r.text());setSyncBadge('🔴 Lỗi lưu cloud','var(--pnk)');return false}
     const x=await r.json();const row=Array.isArray(x)?x[0]:x;
-    if(!row||row.conflict){await resolveCloudConflict(k,sentData);return false}
+    if(!row||row.conflict){await resolveCloudConflict(k);return false}
     if(row.success){
       setCloudVersion(k,row.new_updated_at);
       if(sameJson(localValueForKey(k),sentData)){clearDirty(k);showSaved('☁ Đã lưu cloud','var(--grn)')}
@@ -527,10 +529,13 @@ async function autoPull(){
   try{
     _historyOK=await checkHistoryReady();
     if(!_historyOK){_pullDone=false;refreshSyncBadge();return}
+    // Kéo lần 1: cloud → local
     const rows=await fetchCloudRows();
-    bootstrapCloudRows(rows);
+    applyCloudRows(rows);
     _lastCloudPullAt=Date.now();_pullDone=true;
+    // Đẩy các dirty (nếu có) → cloud + trigger tự log history
     await pushAllDirty(false);
+    // Kéo lại để chắc chắn local = cloud sau khi push
     const fresh=await fetchCloudRows();applyCloudRows(fresh);_lastCloudPullAt=Date.now();
     buildGrids();loadMonth();loadTarget();renderTabs();refreshSyncBadge()
   }catch(e){setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');console.error(e)}
@@ -563,7 +568,7 @@ async function manualSync(){
     if(_dirtyKeys.size)await pushAllDirty(false);
     const rows=await fetchCloudRows();const reconciled=applyCloudRows(rows);_lastCloudPullAt=Date.now();
     buildGrids();loadMonth();loadTarget();renderTabs();
-    toast(reconciled?'↻ Cloud mới hơn đã được áp dụng · Local cũ có Recovery':'✓ Cloud đã đồng bộ + History đã lưu')
+    toast(reconciled?`↻ ${reconciled} key được cập nhật từ cloud`:'✓ Cloud đã đồng bộ · History đã lưu')
   }catch(e){setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');toast('⚠ Offline');console.error(e)}
   finally{_syncBusy=false;refreshSyncBadge()}
 }
@@ -866,6 +871,53 @@ function renderOverview(){
   ovCharts.minMax.update()}
 
 // ═══ ACTIONS ═══
+
+// Reset local: xoá toàn bộ pb_* và metadata sync khỏi localStorage, sau đó pull sạch từ cloud.
+// Cloud là nguồn thật, budget_history_records vẫn còn nguyên (không bị đụng).
+async function resetLocalCache(){
+  const ok=confirm('⚠ XÁC NHẬN RESET LOCAL\n\nSẽ xoá toàn bộ dữ liệu budget trong bộ nhớ trình duyệt (localStorage) và tải lại sạch từ cloud.\n\n• Cloud (Supabase) KHÔNG bị ảnh hưởng\n• Lịch sử (budget_history_records) KHÔNG bị ảnh hưởng\n• Thay đổi local chưa kịp sync sẽ bị mất\n\nTiếp tục?');
+  if(!ok)return;
+  try{
+    // Đẩy nốt các thay đổi đang dirty nếu có (tránh mất data thật)
+    if(_pullDone&&_dirtyKeys.size){toast('🔄 Đang đẩy các thay đổi dở lên cloud...');await pushAllDirty(false)}
+    // Xoá mọi key pb_* và __pb_* (data + dirty flags + cloud version cache)
+    const toDel=[];
+    for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&(k.startsWith('pb_')||k.startsWith('__pb_')))toDel.push(k)}
+    toDel.forEach(k=>localStorage.removeItem(k));
+    _dirtyKeys.clear();_conflictKeys.clear();_cloudVersions={};_pullDone=false;
+    toast(`✓ Đã xoá ${toDel.length} khoá local · đang pull cloud...`);
+    await autoPull();
+    if(curView==='month'){buildGrids();loadMonth();loadTarget()}else{renderOverview()}
+    renderTabs();
+    toast('✓ Đã reset local · đồng bộ sạch từ cloud')
+  }catch(e){console.error(e);toast('⚠ Lỗi khi reset — kiểm tra console')}
+}
+
+// Xoá tháng đang xem: ghi payload rỗng qua budget_safe_save.
+// Trigger SQL sẽ tự tạo bản ghi UPDATE vào budget_history_records với snapshot rỗng
+// → lịch sử vẫn còn nguyên (kể cả các phiên bản trước khi bị "xoá").
+async function deleteCurrentMonth(){
+  if(!_cloudOK){toast('⚠ Chưa cấu hình cloud');return}
+  if(!_pullDone||!_historyOK){toast('⚠ Chưa sẵn sàng cloud/history');return}
+  const monthName=MONTHS[curM]+' '+curY;
+  const ok=confirm(`⚠ XÁC NHẬN XOÁ ${monthName}\n\nToàn bộ số liệu thu nhập & chi tiêu của ${monthName} sẽ được ghi đè bằng rỗng.\n\n• Lịch sử cũ VẪN CÒN trong budget_history_records (action=UPDATE, snapshot chứa data trước khi xoá)\n• Có thể khôi phục bất kỳ lúc nào bằng nút "↓ History CSV" hoặc query trực tiếp Supabase\n\nTiếp tục?`);
+  if(!ok)return;
+  const k=SK(curY,curM);
+  const emptyData={income:{},expenses:{}};
+  // Ghi rỗng vào local trước
+  localStorage.setItem(k,JSON.stringify(emptyData));
+  markDirty(k);
+  // Đẩy lên cloud → trigger tự lưu snapshot cũ vào history rồi ghi đè bằng rỗng
+  toast('🔄 Đang ghi rỗng và lưu lịch sử...');
+  const ok2=await pushDirtyKey(k,false);
+  if(ok2){
+    loadMonth();updateStats();renderTabs();
+    toast(`✓ Đã xoá ${monthName} · Lịch sử đã lưu trong archive`)
+  }else{
+    toast('⚠ Không đẩy được lên cloud — thử lại sau')
+  }
+}
+
 function copyMonth(){const src=prompt('Sao chép từ tháng nào? (1-12)');if(!src)return;
   const sm=parseInt(src)-1;if(isNaN(sm)||sm<0||sm>11||sm===curM){toast('Không hợp lệ');return}
   const sd=load(curY,sm);if(!sd){toast('Tháng nguồn trống');return}
