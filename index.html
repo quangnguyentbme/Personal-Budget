@@ -385,7 +385,7 @@ async function manualSync(){
     const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main',{method:'PATCH',
       headers:_sbH,body:JSON.stringify({data:getAllData(),updated_at:new Date().toISOString()})});
     _pullDone=true;
-    if(r.ok){$('syncBadge').textContent='🟢 Đã đồng bộ · Archive ready';$('syncBadge').style.color='var(--grn)';toast('✓ Đã đồng bộ + archived')}else{toast('⚠ Lỗi '+r.status)}
+    if(r.ok){$('syncBadge').textContent='🟢 Synced · Archived';$('syncBadge').style.color='var(--grn)';toast('✓ Synced & Archived')}else{toast('⚠ Lỗi '+r.status)}
   }catch(e){toast('⚠ Offline')}}
 
 // ═══ SAVINGS TARGET ═══
