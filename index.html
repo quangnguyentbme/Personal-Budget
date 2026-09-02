@@ -331,16 +331,16 @@ const isWeekend=(y,m,d)=>{const dow=new Date(y,m,d).getDay();return dow===0||dow
 const SK=(y,m)=>`pb_${y}_${m}`;
 const toast=msg=>{const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)};
 
-// ═══ STORAGE ═══
-let _saveTimer=null,_storageOK=true;
-try{localStorage.setItem('__t','1');localStorage.removeItem('__t')}catch{_storageOK=false}
+// ═══ STORAGE (in-memory only — data biến mất khi đóng tab, cloud là source of truth) ═══
+let _saveTimer=null;
+const _mem={};                                              // key → JSON string, thay cho localStorage
 const _cloudOK=SUPABASE_URL.length>5&&SUPABASE_KEY.length>5;
 const _sbH={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Prefer':'return=minimal'};
 let _pullDone=false,_lastPullTs=0;
 let _historyOK=false;
 
-function load(y,m){if(!_storageOK)return null;try{return JSON.parse(localStorage.getItem(SK(y,m)))||null}catch{return null}}
-function save(y,m,d){if(!_storageOK)return;try{localStorage.setItem(SK(y,m),JSON.stringify(d));showSaved()}catch(e){console.error('Save:',e)}}
+function load(y,m){try{const v=_mem[SK(y,m)];return v?JSON.parse(v):null}catch{return null}}
+function save(y,m,d){try{_mem[SK(y,m)]=JSON.stringify(d);showSaved()}catch(e){console.error('Save:',e)}}
 function showSaved(){const el=$('saveStatus');if(!el)return;el.style.opacity='1';clearTimeout(el._t);el._t=setTimeout(()=>{el.style.opacity='0'},1800)}
 function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
 
@@ -350,7 +350,7 @@ async function checkHistoryReady(){
 
 // ═══ SUPABASE CLOUD SYNC ═══
 function getAllData(){const a={};for(let y=2026;y<=2030;y++){for(let m=0;m<12;m++){const d=load(y,m);if(d)a[SK(y,m)]=d}};
-  const t=localStorage.getItem('pb_target_global');if(t)a['pb_target_global']=t;
+  const t=_mem['pb_target_global'];if(t)a['pb_target_global']=t;
   a._ts=Date.now();return a}
 
 async function autoPull(){
@@ -361,28 +361,11 @@ async function autoPull(){
     const json=await res.json();if(!json[0]||!json[0].data||!json[0].data._ts)return;
     const data=json[0].data;
     // Always load cloud data (cloud is master)
-    Object.entries(data).forEach(([k,v])=>{if(k.startsWith('pb_'))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});
+    Object.entries(data).forEach(([k,v])=>{if(k.startsWith('pb_'))_mem[k]=(typeof v==='string'?v:JSON.stringify(v))});
     _pullDone=true;
     buildGrids();loadMonth();loadTarget();renderTabs();
     $('syncBadge').textContent='🟢 Đã đồng bộ';$('syncBadge').style.color='var(--grn)'
   }catch(e){$('syncBadge').textContent='🔴 Offline';$('syncBadge').style.color='var(--pnk)';console.error(e)}}
-
-function autoPush(){
-  if(!_cloudOK)return;
-  // NEVER push if pull hasn't completed — prevents overwriting cloud with empty local data
-  if(!_pullDone)return;
-  // NEVER push if history archive is not ready — every write must be logged
-  if(!_historyOK)return;
-  saveNow();
-  const allData=getAllData();
-  const dataKeys=Object.keys(allData).filter(k=>k.startsWith('pb_'));
-  // Don't push if no real data
-  if(dataKeys.length===0)return;
-  // Check if there's any actual content (not just empty objects)
-  const hasContent=dataKeys.some(k=>{const v=allData[k];return v&&typeof v==='object'&&Object.keys(v).length>0&&(v.income||v.expenses)});
-  if(!hasContent)return;
-  try{fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main',{method:'PATCH',keepalive:true,
-    headers:_sbH,body:JSON.stringify({data:allData,updated_at:new Date().toISOString()})})}catch(e){console.error(e)}}
 
 async function manualSync(){
   if(!_cloudOK){toast('⚠ Chưa cấu hình');return}
@@ -393,7 +376,7 @@ async function manualSync(){
     if(res.ok){const json=await res.json();if(json[0]&&json[0].data&&json[0].data._ts){
       const cloud=json[0].data;
       // Merge: cloud data fills gaps, local data wins for existing months
-      Object.entries(cloud).forEach(([k,v])=>{if(k.startsWith('pb_')&&!localStorage.getItem(k))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});
+      Object.entries(cloud).forEach(([k,v])=>{if(k.startsWith('pb_')&&!_mem[k])_mem[k]=(typeof v==='string'?v:JSON.stringify(v))});
       buildGrids();loadMonth();loadTarget();renderTabs()}}
     // Verify history archive before pushing
     if(!_historyOK&&!(await checkHistoryReady())){toast('⚠ History chưa sẵn sàng. Chạy SQL Record History trước.');$('syncBadge').textContent='🟠 History chưa sẵn sàng';$('syncBadge').style.color='var(--org)';return}
@@ -407,8 +390,8 @@ async function manualSync(){
 
 // ═══ SAVINGS TARGET ═══
 function getTarget(){return parseFloat($('savTarget').value)||0}
-function saveTarget(){localStorage.setItem('pb_target_global',getTarget())}
-function loadTarget(){const v=parseFloat(localStorage.getItem('pb_target_global'))||0;$('savTarget').value=v>0?v:''}
+function saveTarget(){_mem['pb_target_global']=String(getTarget())}
+function loadTarget(){const v=parseFloat(_mem['pb_target_global'])||0;$('savTarget').value=v>0?v:''}
 
 function updateTargetUI(inc,exp){
   const tp=getTarget(),bar=$('targetFill'),pe=$('targetPct'),info=$('targetInfo'),al=$('targetAlert');
@@ -461,7 +444,7 @@ function buildGrids(){
   document.querySelectorAll('.dc').forEach(el=>{
     el.addEventListener('input',()=>{debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats();if(_pullDone)autoPush()});
+    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats()});
     el.addEventListener('keydown',e=>{
       const item=el.dataset.item,day=+el.dataset.day;
       if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();fmtDayCell(el);saveNow();updateStats();const nx=$('d_'+item+'_'+(day+1));if(nx)nx.focus()}
@@ -474,7 +457,7 @@ function buildGrids(){
     if(el.id==='savTarget')return;
     el.addEventListener('input',()=>{fmtIncField(el);debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats();if(_pullDone)autoPush()})});
+    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats()})});
   highlightToday()}
 
 function fmtDayCell(el){const n=parseInt(el.value.replace(/\D/g,''))||0;el.value=n>0?n.toLocaleString('vi-VN'):'';el.classList.toggle('has-val',n>0)}
@@ -735,29 +718,22 @@ async function exportHistory(){
   }catch(e){console.error(e);$('syncBadge').textContent='🔴 Lỗi history';$('syncBadge').style.color='var(--pnk)';toast('⚠ Export history thất bại');return false}}
 
 // ═══ INIT ═══
-// Auto-push when closing tab / switching app / locking phone
-document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveNow();autoPush()}});
-window.addEventListener('beforeunload',()=>{saveNow();autoPush()});
-// Also push when phone goes to sleep (pagehide is more reliable on mobile)
-window.addEventListener('pagehide',()=>{saveNow();autoPush()});
+// KHÔNG dùng localStorage. Data chỉ tồn tại trong RAM (biến _mem).
+// Đóng tab → mất hết. Mở lại → pull sạch từ cloud.
+// Chỉ khi user bấm ☁ Đồng bộ, data mới được PATCH lên cloud + sinh 1 dòng history.
+// Cơ chế này đảm bảo nhiều thiết bị access không loạn: cloud luôn là nguồn thật duy nhất.
 
 document.addEventListener('DOMContentLoaded',async ()=>{
-  if(!_storageOK)alert('⚠ localStorage bị chặn.');
-  const testKey='pb_test_'+Date.now();
-  localStorage.setItem(testKey,'ok');
-  if(localStorage.getItem(testKey)==='ok'){localStorage.removeItem(testKey)}
-  else{alert('⚠ localStorage không hoạt động!\nData sẽ mất khi đóng trang.')}
-  
-  // Auto-pull from cloud first (so we get latest data from other device)
+  // Auto-pull from cloud first (nạp trạng thái mới nhất từ device khác)
   initYr();initCharts();
   await autoPull();
   const historyReady=await checkHistoryReady();
-  if(historyReady){$('syncBadge').textContent='🟢 Đã đồng bộ · Archive ready';$('syncBadge').style.color='var(--grn)'}
+  if(historyReady){$('syncBadge').textContent='🟢 Đã tải · Archive ready';$('syncBadge').style.color='var(--grn)'}
   else if(_cloudOK){$('syncBadge').textContent='🟠 History chưa sẵn sàng';$('syncBadge').style.color='var(--org)'}
   renderTabs();buildGrids();loadMonth();loadTarget();
-  
-  setInterval(()=>{saveNow()},60000);
-  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu')}});
+
+  // Ctrl+S = shortcut lưu vào RAM (chưa lên cloud); muốn sync cloud phải bấm nút ☁ Đồng bộ
+  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu tạm (chưa lên cloud — bấm ☁ Đồng bộ để đẩy)')}});
   if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}});
 </script>
 </body>
