@@ -111,6 +111,7 @@ body{font-family:'Calibri',Arial,sans-serif;background:var(--bg);color:var(--t);
     <select class="yr-s" id="yrS"></select>
     <button class="btn" style="background:var(--bbg);color:var(--blu);font-size:12px" onclick="manualSync()">☁ Đồng bộ</button>
     <button class="btn btn-b" onclick="exportCSV()">↓ CSV</button>
+    <button class="btn btn-o" onclick="exportHistoryCSV()">↓ History CSV</button>
     <button class="btn btn-o" onclick="copyMonth()">Sao chép tháng</button>
   </div>
 </div>
@@ -334,70 +335,43 @@ const toast=msg=>{const t=$('toast');t.textContent=msg;t.classList.add('show');s
 let _saveTimer=null,_storageOK=true;
 try{localStorage.setItem('__t','1');localStorage.removeItem('__t')}catch{_storageOK=false}
 const _cloudOK=SUPABASE_URL.length>5&&SUPABASE_KEY.length>5;
-const _sbH={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Prefer':'return=minimal'};
-let _pullDone=false,_lastPullTs=0;
-
+const _sbBaseH={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
+const _sbH={..._sbBaseH,'Prefer':'return=minimal'};
+const _META_DIRTY='__pb_dirty_keys',_META_VERS='__pb_cloud_versions';
+let _pullDone=false,_historyOK=false,_conflictKeys=new Set();
+let _dirtyKeys=new Set();let _cloudVersions={};
+try{const x=JSON.parse(localStorage.getItem(_META_DIRTY)||'[]');if(Array.isArray(x))_dirtyKeys=new Set(x)}catch{}
+try{const x=JSON.parse(localStorage.getItem(_META_VERS)||'{}');if(x&&typeof x==='object')_cloudVersions=x}catch{}
+function persistSyncMeta(){try{localStorage.setItem(_META_DIRTY,JSON.stringify([..._dirtyKeys]));localStorage.setItem(_META_VERS,JSON.stringify(_cloudVersions))}catch{}}
+function isBudgetKey(k){return /^pb_\d{4}_(?:[0-9]|1[01])$/.test(k)||k==='pb_target_global'}
+function markDirty(k){if(!isBudgetKey(k))return;_dirtyKeys.add(k);persistSyncMeta()}
+function clearDirty(k){_dirtyKeys.delete(k);_conflictKeys.delete(k);persistSyncMeta()}
+function setCloudVersion(k,v){if(v)_cloudVersions[k]=v;else delete _cloudVersions[k];persistSyncMeta()}
+function setSyncBadge(txt,color){const b=$('syncBadge');if(!b)return;b.textContent=txt;b.style.color=color}
+function refreshSyncBadge(){if(!_cloudOK){setSyncBadge('⚪ Chưa cấu hình cloud','var(--t3)');return}if(_conflictKeys.size){setSyncBadge(`🟠 ${_conflictKeys.size} xung đột · Local được giữ`,'var(--org)');return}if(!_historyOK){setSyncBadge('🟠 History chưa sẵn sàng','var(--org)');return}setSyncBadge('🟢 Đã đồng bộ · Archive ready','var(--grn)')}
 function load(y,m){if(!_storageOK)return null;try{return JSON.parse(localStorage.getItem(SK(y,m)))||null}catch{return null}}
-function save(y,m,d){if(!_storageOK)return;try{localStorage.setItem(SK(y,m),JSON.stringify(d));showSaved()}catch(e){console.error('Save:',e)}}
+function save(y,m,d){if(!_storageOK)return false;try{const k=SK(y,m),v=JSON.stringify(d),old=localStorage.getItem(k);if(old===v)return false;localStorage.setItem(k,v);markDirty(k);showSaved();return true}catch(e){console.error('Save:',e);return false}}
 function showSaved(){const el=$('saveStatus');if(!el)return;el.style.opacity='1';clearTimeout(el._t);el._t=setTimeout(()=>{el.style.opacity='0'},1800)}
 function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
+function localValueForKey(k){const raw=localStorage.getItem(k);if(raw===null)return null;if(k==='pb_target_global')return raw;try{return JSON.parse(raw)}catch{return null}}
+function sameJson(a,b){try{return JSON.stringify(a)===JSON.stringify(b)}catch{return false}}
 
-// ═══ SUPABASE CLOUD SYNC ═══
-function getAllData(){const a={};for(let y=2026;y<=2030;y++){for(let m=0;m<12;m++){const d=load(y,m);if(d)a[SK(y,m)]=d}};
-  const t=localStorage.getItem('pb_target_global');if(t)a['pb_target_global']=t;
-  a._ts=Date.now();return a}
-
-async function autoPull(){
-  if(!_cloudOK)return;
-  $('syncBadge').textContent='🔄 Đang tải...';$('syncBadge').style.color='var(--blu)';
-  try{const res=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main&select=data',{headers:_sbH});
-    if(!res.ok){$('syncBadge').textContent='🔴 Lỗi';$('syncBadge').style.color='var(--pnk)';return}
-    const json=await res.json();if(!json[0]||!json[0].data||!json[0].data._ts)return;
-    const data=json[0].data;
-    // Always load cloud data (cloud is master)
-    Object.entries(data).forEach(([k,v])=>{if(k.startsWith('pb_'))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});
-    _pullDone=true;
-    buildGrids();loadMonth();loadTarget();renderTabs();
-    $('syncBadge').textContent='🟢 Đã đồng bộ';$('syncBadge').style.color='var(--grn)'
-  }catch(e){$('syncBadge').textContent='🔴 Offline';$('syncBadge').style.color='var(--pnk)';console.error(e)}}
-
-function autoPush(){
-  if(!_cloudOK)return;
-  // NEVER push if pull hasn't completed — prevents overwriting cloud with empty local data
-  if(!_pullDone)return;
-  saveNow();
-  const allData=getAllData();
-  const dataKeys=Object.keys(allData).filter(k=>k.startsWith('pb_'));
-  // Don't push if no real data
-  if(dataKeys.length===0)return;
-  // Check if there's any actual content (not just empty objects)
-  const hasContent=dataKeys.some(k=>{const v=allData[k];return v&&typeof v==='object'&&Object.keys(v).length>0&&(v.income||v.expenses)});
-  if(!hasContent)return;
-  try{fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main',{method:'PATCH',keepalive:true,
-    headers:_sbH,body:JSON.stringify({data:allData,updated_at:new Date().toISOString()})})}catch(e){console.error(e)}}
-
-async function manualSync(){
-  if(!_cloudOK){toast('⚠ Chưa cấu hình');return}
-  saveNow();toast('🔄 Đang đồng bộ...');
-  try{
-    // Pull first to get latest
-    const res=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main&select=data',{headers:_sbH});
-    if(res.ok){const json=await res.json();if(json[0]&&json[0].data&&json[0].data._ts){
-      const cloud=json[0].data;
-      // Merge: cloud data fills gaps, local data wins for existing months
-      Object.entries(cloud).forEach(([k,v])=>{if(k.startsWith('pb_')&&!localStorage.getItem(k))localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))});
-      buildGrids();loadMonth();loadTarget();renderTabs()}}
-    // Then push merged data
-    saveNow();
-    const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?id=eq.main',{method:'PATCH',
-      headers:_sbH,body:JSON.stringify({data:getAllData(),updated_at:new Date().toISOString()})});
-    _pullDone=true;
-    if(r.ok){$('syncBadge').textContent='🟢 Đã đồng bộ';$('syncBadge').style.color='var(--grn)';toast('✓ Đã đồng bộ')}else{toast('⚠ Lỗi '+r.status)}
-  }catch(e){toast('⚠ Offline')}}
+// ═══ SUPABASE CLOUD SYNC · SAFE PER-ROW ═══
+async function checkHistoryReady(){if(!_cloudOK)return false;try{const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_history_ready',{method:'POST',headers:_sbBaseH,body:'{}'});if(!r.ok)return false;const x=await r.json();return x===true||(Array.isArray(x)&&x[0]===true)}catch{return false}}
+async function fetchCloudRows(){const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?select=id,data,updated_at&order=id.asc',{headers:_sbBaseH});if(!r.ok)throw new Error('Cloud read '+r.status);return await r.json()}
+function applyCloudRows(rows){let conflicts=0;for(const row of rows){const k=row.id;if(!isBudgetKey(k))continue;const cloudVer=row.updated_at||null,base=_cloudVersions[k]||null,local=localValueForKey(k),dirty=_dirtyKeys.has(k);
+    if(dirty){if((base&&cloudVer!==base)||(!base&&cloudVer&&!sameJson(local,row.data))){_conflictKeys.add(k);conflicts++;continue}if(!base&&sameJson(local,row.data)){setCloudVersion(k,cloudVer);clearDirty(k);continue}continue}
+    if(!base&&local!==null&&!sameJson(local,row.data)){_dirtyKeys.add(k);_conflictKeys.add(k);setCloudVersion(k,cloudVer);conflicts++;continue}
+    localStorage.setItem(k,typeof row.data==='string'?row.data:JSON.stringify(row.data));setCloudVersion(k,cloudVer);_conflictKeys.delete(k)}persistSyncMeta();return conflicts}
+async function autoPull(){if(!_cloudOK)return;setSyncBadge('🔄 Đang tải...','var(--blu)');try{_historyOK=await checkHistoryReady();const rows=await fetchCloudRows();applyCloudRows(rows);_pullDone=true;buildGrids();loadMonth();loadTarget();renderTabs();refreshSyncBadge()}catch(e){setSyncBadge('🔴 Offline','var(--pnk)');console.error(e)}}
+async function pushDirtyKey(k,keepalive=false){if(!_cloudOK||!_pullDone||!_historyOK||!_dirtyKeys.has(k)||_conflictKeys.has(k))return false;const d=localValueForKey(k);if(d===null)return false;try{const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_safe_save',{method:'POST',keepalive,headers:_sbBaseH,body:JSON.stringify({p_id:k,p_data:d,p_expected_updated_at:_cloudVersions[k]||null})});if(!r.ok){console.error('Cloud save',r.status,await r.text());setSyncBadge('🔴 Lỗi lưu cloud','var(--pnk)');return false}const x=await r.json();const row=Array.isArray(x)?x[0]:x;if(!row||row.conflict){_conflictKeys.add(k);persistSyncMeta();refreshSyncBadge();toast('⚠ Cloud đã thay đổi trên thiết bị khác. Local được giữ, không ghi đè.');return false}if(row.success){setCloudVersion(k,row.new_updated_at);clearDirty(k);refreshSyncBadge();return true}return false}catch(e){console.error(e);setSyncBadge('🔴 Offline','var(--pnk)');return false}}
+async function pushAllDirty(keepalive=false){const keys=[..._dirtyKeys].filter(isBudgetKey);let ok=0;for(const k of keys){if(await pushDirtyKey(k,keepalive))ok++}return ok}
+function autoPush(){if(!_cloudOK||!_pullDone)return;saveNow();void pushAllDirty(true)}
+async function manualSync(){if(!_cloudOK){toast('⚠ Chưa cấu hình');return}saveNow();toast('🔄 Đang đồng bộ...');setSyncBadge('🔄 Đang đồng bộ...','var(--blu)');try{_historyOK=await checkHistoryReady();if(!_historyOK){refreshSyncBadge();toast('⚠ History chưa sẵn sàng. Không ghi cloud.');return}const rows=await fetchCloudRows();const conflicts=applyCloudRows(rows);_pullDone=true;await pushAllDirty(false);buildGrids();loadMonth();loadTarget();renderTabs();refreshSyncBadge();if(conflicts||_conflictKeys.size)toast('⚠ Có xung đột. Local được giữ, không ghi đè cloud.');else toast('✓ Đã đồng bộ + lưu History')}catch(e){setSyncBadge('🔴 Offline','var(--pnk)');toast('⚠ Offline');console.error(e)}}
 
 // ═══ SAVINGS TARGET ═══
 function getTarget(){return parseFloat($('savTarget').value)||0}
-function saveTarget(){localStorage.setItem('pb_target_global',getTarget())}
+let _targetPushTimer=null;function saveTarget(){const k='pb_target_global',v=String(getTarget()),old=localStorage.getItem(k);if(old!==v){localStorage.setItem(k,v);markDirty(k);showSaved()}clearTimeout(_targetPushTimer);_targetPushTimer=setTimeout(()=>{if(_pullDone)void pushDirtyKey(k)},500)}
 function loadTarget(){const v=parseFloat(localStorage.getItem('pb_target_global'))||0;$('savTarget').value=v>0?v:''}
 
 function updateTargetUI(inc,exp){
@@ -696,13 +670,17 @@ function renderOverview(){
 function copyMonth(){const src=prompt('Sao chép từ tháng nào? (1-12)');if(!src)return;
   const sm=parseInt(src)-1;if(isNaN(sm)||sm<0||sm>11||sm===curM){toast('Không hợp lệ');return}
   const sd=load(curY,sm);if(!sd){toast('Tháng nguồn trống');return}
-  save(curY,curM,JSON.parse(JSON.stringify(sd)));buildGrids();loadMonth();renderTabs();toast(`Đã sao chép từ ${MONTHS[sm]}`)}
+  save(curY,curM,JSON.parse(JSON.stringify(sd)));buildGrids();loadMonth();renderTabs();if(_pullDone)void pushDirtyKey(SK(curY,curM));toast(`Đã sao chép từ ${MONTHS[sm]}`)}
 
 function exportCSV(){const hdr=['Tháng','Lương','Thưởng','Hoa hồng','TỔNG THU',...CATS.map(c=>c.vi),'TỔNG CHI','TIẾT KIỆM','TỶ LỆ'];
   const rows=[hdr.join(',')];for(let m=0;m<12;m++){const md=load(curY,m)||{income:{},expenses:{}};
     const inc=incTotalFromData(md),exp=expTotalFromData(md),sav=inc-exp;
     rows.push([MONTHS[m],...INC_KEYS.map(k=>md.income?.[k]||0),inc,...CATS.map(c=>catTotalFromData(md,c)),exp,sav,inc>0?(sav/inc*100).toFixed(1)+'%':'0%'].join(','))}
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\uFEFF'+rows.join('\n')],{type:'text/csv;charset=utf-8;'}));a.download=`Budget_${curY}.csv`;a.click();toast('Đã xuất CSV!')}
+
+function csvCell(v){const s=String(v??'').replace(/"/g,'""');return /[",\n]/.test(s)?`"${s}"`:s}
+async function exportHistoryCSV(){if(!_cloudOK){toast('⚠ Chưa cấu hình cloud');return}toast('🔄 Đang tải History...');try{const all=[];let offset=0;const limit=1000;while(true){const r=await fetch(SUPABASE_URL+`/rest/v1/budget_history_records?select=history_id,budget_key,action,version_at,created_at,snapshot&order=history_id.asc&limit=${limit}&offset=${offset}`,{headers:_sbBaseH});if(!r.ok)throw new Error('History '+r.status);const part=await r.json();all.push(...part);if(part.length<limit)break;offset+=limit}if(!all.length){toast('History đang trống');return}const hdr=['HISTORY ID','BUDGET KEY','YEAR','MONTH','ACTION','VERSION AT','ARCHIVED AT','INCOME TOTAL','EXPENSE TOTAL','SAVINGS','SNAPSHOT JSON'];const rows=[hdr.map(csvCell).join(',')];all.forEach(h=>{const m=/^pb_(\d{4})_(\d{1,2})$/.exec(h.budget_key);const d=h.snapshot&&typeof h.snapshot==='object'&&!Array.isArray(h.snapshot)?h.snapshot:null;const inc=d?incTotalFromData(d):'',exp=d?expTotalFromData(d):'',sav=d?(inc-exp):'';rows.push([h.history_id,h.budget_key,m?m[1]:'',m?Number(m[2])+1:'',h.action,h.version_at||'',h.created_at||'',inc,exp,sav,JSON.stringify(h.snapshot)].map(csvCell).join(','))});const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\uFEFF'+rows.join('\n')],{type:'text/csv;charset=utf-8;'}));a.download=`Budget_HISTORY_${new Date().toISOString().slice(0,10)}.csv`;a.click();toast(`✓ Exported ${all.length} history records`)}catch(e){console.error(e);toast('⚠ Không export được History')}}
+
 
 // ═══ INIT ═══
 // Auto-push when closing tab / switching app / locking phone
@@ -723,8 +701,8 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   await autoPull();
   renderTabs();buildGrids();loadMonth();loadTarget();
   
-  setInterval(()=>{saveNow()},60000);
-  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu')}});
+  setInterval(()=>{saveNow();if(_pullDone)void pushDirtyKey(SK(curY,curM))},60000);
+  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();if(_pullDone)void pushAllDirty(false);toast('✓ Đã lưu local · đang đồng bộ')}});
   if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}});
 </script>
 </body>
