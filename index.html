@@ -7,6 +7,9 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="apple-touch-icon" href="icon.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Personal Budget Tracker</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
@@ -106,7 +109,7 @@ body{font-family:'Calibri',Arial,sans-serif;background:var(--bg);color:var(--t);
 <div class="app" id="mainApp">
 
 <div class="hdr">
-  <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--t2);opacity:0;transition:opacity .3s"></span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span></p></div>
+  <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--t2);opacity:0;transition:opacity .3s"></span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span> <span style="font-size:9px;color:var(--t3)">· SYNC V4</span></p></div>
   <div class="hdr-act">
     <select class="yr-s" id="yrS"></select>
     <button class="btn" style="background:var(--bbg);color:var(--blu);font-size:12px" onclick="manualSync()">☁ Đồng bộ</button>
@@ -335,26 +338,27 @@ const toast=msg=>{const t=$('toast');t.textContent=msg;t.classList.add('show');s
 let _saveTimer=null,_storageOK=true;
 try{localStorage.setItem('__t','1');localStorage.removeItem('__t')}catch{_storageOK=false}
 const _cloudOK=SUPABASE_URL.length>5&&SUPABASE_KEY.length>5;
-const _sbBaseH={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
+const _sbBaseH={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Cache-Control':'no-cache'};
 const _META_DIRTY='__pb_dirty_keys',_META_VERS='__pb_cloud_versions';
 let _pullDone=false,_historyOK=false,_syncBusy=false,_lastCloudPullAt=0;
 let _conflictKeys=new Set(),_dirtyKeys=new Set(),_cloudVersions={};
 const _pushTimers=new Map(),_pushInFlight=new Map();
+const APP_BUILD='PB-SYNC-V4-20260902';
+console.log(APP_BUILD);
 
 try{const x=JSON.parse(localStorage.getItem(_META_DIRTY)||'[]');if(Array.isArray(x))_dirtyKeys=new Set(x)}catch{}
 try{const x=JSON.parse(localStorage.getItem(_META_VERS)||'{}');if(x&&typeof x==='object')_cloudVersions=x}catch{}
 
 function persistSyncMeta(){try{localStorage.setItem(_META_DIRTY,JSON.stringify([..._dirtyKeys]));localStorage.setItem(_META_VERS,JSON.stringify(_cloudVersions))}catch{}}
 function isBudgetKey(k){return /^pb_\d{4}_(?:[0-9]|1[01])$/.test(k)||k==='pb_target_global'}
-function markDirty(k){if(!isBudgetKey(k))return;_dirtyKeys.add(k);persistSyncMeta();refreshSyncBadge()}
+function markDirty(k){if(!isBudgetKey(k))return;_dirtyKeys.add(k);_conflictKeys.delete(k);persistSyncMeta();refreshSyncBadge()}
 function clearDirty(k){_dirtyKeys.delete(k);_conflictKeys.delete(k);persistSyncMeta()}
 function setCloudVersion(k,v){if(v)_cloudVersions[k]=v;else delete _cloudVersions[k];persistSyncMeta()}
 function setSyncBadge(txt,color){const b=$('syncBadge');if(!b)return;b.textContent=txt;b.style.color=color}
 function refreshSyncBadge(){
   if(!_cloudOK){setSyncBadge('⚪ Chưa cấu hình cloud','var(--t3)');return}
-  if(_conflictKeys.size){setSyncBadge(`🟠 ${_conflictKeys.size} xung đột · Local được giữ`,'var(--org)');return}
   if(!_historyOK){setSyncBadge('🟠 History chưa sẵn sàng','var(--org)');return}
-  if(_syncBusy||_pushInFlight.size){setSyncBadge('🔄 Đang lưu cloud...','var(--blu)');return}
+  if(_syncBusy||_pushInFlight.size){setSyncBadge('🔄 Đang đồng bộ cloud...','var(--blu)');return}
   const pending=[..._dirtyKeys].filter(isBudgetKey).length;
   if(pending){setSyncBadge(`🟡 ${pending} thay đổi chờ cloud`,'var(--org)');return}
   setSyncBadge('🟢 Cloud synced · Archive ready','var(--grn)')
@@ -371,18 +375,18 @@ function save(y,m,d){
     localStorage.setItem(k,v);
     markDirty(k);
     showSaved('✓ Đã lưu local','var(--t2)');
-    if(_pullDone)scheduleCloudPush(k,1100);
+    if(_pullDone)scheduleCloudPush(k,700);
     return true
   }catch(e){console.error('Save:',e);return false}
 }
 function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
-function stashRecovery(k,v){try{localStorage.setItem('__pb_recovery_'+k,JSON.stringify({saved_at:new Date().toISOString(),data:v}))}catch{}}
+function stashRecovery(k,v,reason='cloud_newer'){try{localStorage.setItem('__pb_recovery_'+k,JSON.stringify({saved_at:new Date().toISOString(),reason,data:v}))}catch{}}
 
-// ═══ SUPABASE CLOUD SYNC · SAFE + COALESCED ═══
+// ═══ SUPABASE CLOUD SYNC · CLOUD CANONICAL + SAFE HISTORY ═══
 async function checkHistoryReady(){
   if(!_cloudOK)return false;
   try{
-    const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_history_ready',{method:'POST',headers:_sbBaseH,body:'{}'});
+    const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_history_ready',{method:'POST',headers:_sbBaseH,body:'{}',cache:'no-store'});
     if(!r.ok)return false;
     const x=await r.json();
     return x===true||(Array.isArray(x)&&x[0]===true)
@@ -390,133 +394,123 @@ async function checkHistoryReady(){
 }
 
 async function fetchCloudRows(){
-  const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?select=id,data,updated_at&order=id.asc',{headers:_sbBaseH,cache:'no-store'});
+  const u=SUPABASE_URL+'/rest/v1/budget_data?select=id,data,updated_at&order=id.asc&_='+Date.now();
+  const r=await fetch(u,{headers:_sbBaseH,cache:'no-store'});
   if(!r.ok)throw new Error('Cloud read '+r.status);
   return await r.json()
 }
 
-function applyCloudRows(rows){
-  let conflicts=0;
-  for(const row of rows){
-    const k=row.id;
-    if(!isBudgetKey(k))continue;
-    const cloudVer=row.updated_at||null;
-    const base=_cloudVersions[k]||null;
-    const local=localValueForKey(k);
-    const dirty=_dirtyKeys.has(k);
-
-    // First trusted baseline on this browser: CLOUD is master.
-    // If old local data exists from a pre-safe version, keep one recovery copy
-    // but do not create a fake conflict.
-    if(!base){
-      if(dirty&&local!==null&&!sameJson(local,row.data))stashRecovery(k,local);
-      localStorage.setItem(k,typeof row.data==='string'?row.data:JSON.stringify(row.data));
-      setCloudVersion(k,cloudVer);
-      clearDirty(k);
-      continue
-    }
-
-    // Local has unsynced edits based on a known cloud version.
-    if(dirty){
-      if(cloudVer!==base){
-        _conflictKeys.add(k);
-        conflicts++;
-      }
-      // If cloud version is unchanged, keep local and push it afterwards.
-      continue
-    }
-
-    // Clean local: always refresh from cloud.
-    localStorage.setItem(k,typeof row.data==='string'?row.data:JSON.stringify(row.data));
-    setCloudVersion(k,cloudVer);
-    _conflictKeys.delete(k)
-  }
-  persistSyncMeta();
-  return conflicts
+async function fetchCloudKey(k){
+  const u=SUPABASE_URL+'/rest/v1/budget_data?id=eq.'+encodeURIComponent(k)+'&select=id,data,updated_at&_='+Date.now();
+  const r=await fetch(u,{headers:_sbBaseH,cache:'no-store'});
+  if(!r.ok)throw new Error('Cloud read '+r.status);
+  const rows=await r.json();
+  return rows[0]||null
 }
 
-function scheduleCloudPush(k,delay=1100){
-  if(!_pullDone||!_cloudOK||!_historyOK||!isBudgetKey(k)||_conflictKeys.has(k))return;
+function writeCloudRowToLocal(row){
+  const k=row.id;if(!isBudgetKey(k))return;
+  localStorage.setItem(k,typeof row.data==='string'?row.data:JSON.stringify(row.data));
+  setCloudVersion(k,row.updated_at||null);
+  clearDirty(k)
+}
+
+// Startup reconciliation:
+// - clean/stale local => cloud wins
+// - truly unsynced local based on the SAME cloud version => keep it and push it
+// - ambiguous/old conflict metadata => recovery copy + cloud wins
+function bootstrapCloudRows(rows){
+  const cloudMap=new Map(rows.filter(r=>isBudgetKey(r.id)).map(r=>[r.id,r]));
+  _conflictKeys.clear();
+  for(const [k,row] of cloudMap){
+    const local=localValueForKey(k),base=_cloudVersions[k]||null,dirty=_dirtyKeys.has(k),cloudVer=row.updated_at||null;
+    if(dirty&&base&&cloudVer===base){continue}
+    if(dirty&&local!==null&&!sameJson(local,row.data))stashRecovery(k,local,'startup_reconcile');
+    writeCloudRowToLocal(row)
+  }
+  // Local-only dirty keys are allowed to create a new cloud row.
+  for(const k of [..._dirtyKeys]){
+    if(!isBudgetKey(k))continue;
+    if(!cloudMap.has(k))setCloudVersion(k,null)
+  }
+  persistSyncMeta()
+}
+
+// Normal refresh. If cloud changed while local is dirty, cloud becomes canonical;
+// the unsynced local copy is preserved under __pb_recovery_<key> instead of freezing forever.
+function applyCloudRows(rows){
+  let reconciled=0;
+  _conflictKeys.clear();
+  for(const row of rows){
+    const k=row.id;if(!isBudgetKey(k))continue;
+    const cloudVer=row.updated_at||null,base=_cloudVersions[k]||null,local=localValueForKey(k),dirty=_dirtyKeys.has(k);
+    if(dirty&&base&&cloudVer===base)continue;
+    if(dirty&&local!==null&&!sameJson(local,row.data)){stashRecovery(k,local,'cloud_newer');reconciled++}
+    writeCloudRowToLocal(row)
+  }
+  persistSyncMeta();
+  return reconciled
+}
+
+function scheduleCloudPush(k,delay=700){
+  if(!_pullDone||!_cloudOK||!_historyOK||!isBudgetKey(k))return;
   const old=_pushTimers.get(k);if(old)clearTimeout(old);
   const t=setTimeout(()=>{_pushTimers.delete(k);void pushDirtyKey(k,false)},delay);
   _pushTimers.set(k,t)
 }
 
+async function resolveCloudConflict(k,localCopy){
+  try{
+    if(localCopy!==null)stashRecovery(k,localCopy,'rpc_conflict');
+    const row=await fetchCloudKey(k);
+    if(row){writeCloudRowToLocal(row)}
+    else{setCloudVersion(k,null);clearDirty(k)}
+    _conflictKeys.delete(k);persistSyncMeta();refreshSyncBadge();
+    showSaved('↻ Cloud mới hơn · đã tải bản cloud','var(--org)');
+    toast('↻ Đã lấy bản mới nhất từ cloud. Bản local cũ vẫn có Recovery.');
+    if(curView==='month'&&k===SK(curY,curM)){loadMonth();loadTarget()}
+    return true
+  }catch(e){console.error(e);return false}
+}
+
 async function _doPushDirtyKey(k,keepalive=false){
-  if(!_cloudOK||!_pullDone||!_historyOK||!_dirtyKeys.has(k)||_conflictKeys.has(k))return false;
+  if(!_cloudOK||!_pullDone||!_historyOK||!_dirtyKeys.has(k))return false;
   const sentData=localValueForKey(k);
   if(sentData===null)return false;
   const expected=_cloudVersions[k]||null;
   refreshSyncBadge();
-
   try{
     const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_safe_save',{
-      method:'POST',
-      keepalive,
-      headers:_sbBaseH,
-      body:JSON.stringify({p_id:k,p_data:sentData,p_expected_updated_at:expected})
+      method:'POST',keepalive,headers:_sbBaseH,
+      body:JSON.stringify({p_id:k,p_data:sentData,p_expected_updated_at:expected}),
+      cache:'no-store'
     });
-
-    if(!r.ok){
-      console.error('Cloud save',r.status,await r.text());
-      setSyncBadge('🔴 Lỗi lưu cloud','var(--pnk)');
-      return false
-    }
-
-    const x=await r.json();
-    const row=Array.isArray(x)?x[0]:x;
-
-    if(!row||row.conflict){
-      _conflictKeys.add(k);
-      persistSyncMeta();
-      refreshSyncBadge();
-      toast('⚠ Cloud đã thay đổi trên thiết bị khác. Local được giữ, không ghi đè.');
-      return false
-    }
-
+    if(!r.ok){console.error('Cloud save',r.status,await r.text());setSyncBadge('🔴 Lỗi lưu cloud','var(--pnk)');return false}
+    const x=await r.json();const row=Array.isArray(x)?x[0]:x;
+    if(!row||row.conflict){await resolveCloudConflict(k,sentData);return false}
     if(row.success){
       setCloudVersion(k,row.new_updated_at);
-
-      // If the user edited again while this request was in flight,
-      // keep the key dirty and immediately queue one more save.
-      if(sameJson(localValueForKey(k),sentData)){
-        clearDirty(k);
-        showSaved('☁ Đã lưu cloud','var(--grn)')
-      }else{
-        _dirtyKeys.add(k);
-        persistSyncMeta();
-        if(!keepalive)scheduleCloudPush(k,250)
-      }
-      refreshSyncBadge();
-      return true
+      if(sameJson(localValueForKey(k),sentData)){clearDirty(k);showSaved('☁ Đã lưu cloud','var(--grn)')}
+      else{_dirtyKeys.add(k);persistSyncMeta();if(!keepalive)scheduleCloudPush(k,200)}
+      refreshSyncBadge();return true
     }
     return false
-  }catch(e){
-    console.error(e);
-    setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');
-    return false
-  }
+  }catch(e){console.error(e);setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');return false}
 }
 
 async function pushDirtyKey(k,keepalive=false){
   if(_pushInFlight.has(k)){
     try{await _pushInFlight.get(k)}catch{}
-    if(_dirtyKeys.has(k)&&!_conflictKeys.has(k)&&!keepalive)return pushDirtyKey(k,false);
+    if(_dirtyKeys.has(k)&&!keepalive)return pushDirtyKey(k,false);
     return !_dirtyKeys.has(k)
   }
-  const p=_doPushDirtyKey(k,keepalive);
-  _pushInFlight.set(k,p);
+  const p=_doPushDirtyKey(k,keepalive);_pushInFlight.set(k,p);
   try{return await p}
-  finally{
-    _pushInFlight.delete(k);
-    refreshSyncBadge();
-    if(_dirtyKeys.has(k)&&!_conflictKeys.has(k)&&!keepalive)scheduleCloudPush(k,250)
-  }
+  finally{_pushInFlight.delete(k);refreshSyncBadge();if(_dirtyKeys.has(k)&&!keepalive)scheduleCloudPush(k,200)}
 }
 
 async function pushAllDirty(keepalive=false){
-  const keys=[..._dirtyKeys].filter(isBudgetKey);
-  let ok=0;
+  const keys=[..._dirtyKeys].filter(isBudgetKey);let ok=0;
   for(const k of keys){if(await pushDirtyKey(k,keepalive))ok++}
   return ok
 }
@@ -529,64 +523,49 @@ function flushCloudBestEffort(){
 
 async function autoPull(){
   if(!_cloudOK)return;
-  _syncBusy=true;
-  setSyncBadge('🔄 Đang tải cloud...','var(--blu)');
+  _syncBusy=true;setSyncBadge('🔄 Đang tải cloud...','var(--blu)');
   try{
     _historyOK=await checkHistoryReady();
     if(!_historyOK){_pullDone=false;refreshSyncBadge();return}
     const rows=await fetchCloudRows();
-    applyCloudRows(rows);
-    _lastCloudPullAt=Date.now();
-    _pullDone=true;
+    bootstrapCloudRows(rows);
+    _lastCloudPullAt=Date.now();_pullDone=true;
     await pushAllDirty(false);
-    buildGrids();loadMonth();loadTarget();renderTabs();
-    refreshSyncBadge()
-  }catch(e){
-    setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');
-    console.error(e)
-  }finally{_syncBusy=false;refreshSyncBadge()}
+    const fresh=await fetchCloudRows();applyCloudRows(fresh);_lastCloudPullAt=Date.now();
+    buildGrids();loadMonth();loadTarget();renderTabs();refreshSyncBadge()
+  }catch(e){setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');console.error(e)}
+  finally{_syncBusy=false;refreshSyncBadge()}
 }
 
 async function refreshFromCloudQuietly(force=false){
-  if(!_cloudOK||!_pullDone||_syncBusy||_pushInFlight.size)return;
+  if(!_cloudOK||!_pullDone||_syncBusy)return;
   if(!force&&Date.now()-_lastCloudPullAt<10000)return;
   _syncBusy=true;
   try{
-    _historyOK=await checkHistoryReady();
-    if(!_historyOK){refreshSyncBadge();return}
-    const rows=await fetchCloudRows();
-    applyCloudRows(rows);
-    _lastCloudPullAt=Date.now();
-    await pushAllDirty(false);
+    _historyOK=await checkHistoryReady();if(!_historyOK){refreshSyncBadge();return}
+    if(_pushInFlight.size)await Promise.allSettled([..._pushInFlight.values()]);
+    if(_dirtyKeys.size)await pushAllDirty(false);
+    const rows=await fetchCloudRows();const reconciled=applyCloudRows(rows);_lastCloudPullAt=Date.now();
     if(curView==='month'){buildGrids();loadMonth();loadTarget()}else{renderOverview()}
-    renderTabs()
+    renderTabs();
+    if(reconciled)showSaved('↻ Đã lấy bản cloud mới hơn','var(--org)')
   }catch(e){console.error(e)}
   finally{_syncBusy=false;refreshSyncBadge()}
 }
 
 async function manualSync(){
   if(!_cloudOK){toast('⚠ Chưa cấu hình');return}
-  saveNow();
-  toast('🔄 Đang đồng bộ...');
-  _syncBusy=true;
-  setSyncBadge('🔄 Đang đồng bộ...','var(--blu)');
+  saveNow();toast('🔄 Đang đồng bộ...');_syncBusy=true;setSyncBadge('🔄 Đang đồng bộ...','var(--blu)');
   try{
     if(_pushInFlight.size)await Promise.allSettled([..._pushInFlight.values()]);
-    _historyOK=await checkHistoryReady();
-    if(!_historyOK){toast('⚠ History chưa sẵn sàng. Không ghi cloud.');return}
-    const rows=await fetchCloudRows();
-    const conflicts=applyCloudRows(rows);
-    _lastCloudPullAt=Date.now();
+    _historyOK=await checkHistoryReady();if(!_historyOK){toast('⚠ History chưa sẵn sàng. Không ghi cloud.');return}
     _pullDone=true;
-    await pushAllDirty(false);
+    if(_dirtyKeys.size)await pushAllDirty(false);
+    const rows=await fetchCloudRows();const reconciled=applyCloudRows(rows);_lastCloudPullAt=Date.now();
     buildGrids();loadMonth();loadTarget();renderTabs();
-    if(conflicts||_conflictKeys.size)toast('⚠ Có xung đột thật. Local được giữ, cloud không bị ghi đè.');
-    else toast('✓ Cloud đã cập nhật + History đã lưu')
-  }catch(e){
-    setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');
-    toast('⚠ Offline');
-    console.error(e)
-  }finally{_syncBusy=false;refreshSyncBadge()}
+    toast(reconciled?'↻ Cloud mới hơn đã được áp dụng · Local cũ có Recovery':'✓ Cloud đã đồng bộ + History đã lưu')
+  }catch(e){setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');toast('⚠ Offline');console.error(e)}
+  finally{_syncBusy=false;refreshSyncBadge()}
 }
 
 // ═══ SAVINGS TARGET ═══
@@ -645,7 +624,7 @@ function buildGrids(){
   document.querySelectorAll('.dc').forEach(el=>{
     el.addEventListener('input',()=>{debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats();if(_pullDone)scheduleCloudPush(SK(curY,curM),350)});
+    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats();if(_pullDone)void pushDirtyKey(SK(curY,curM),false)});
     el.addEventListener('keydown',e=>{
       const item=el.dataset.item,day=+el.dataset.day;
       if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();fmtDayCell(el);saveNow();updateStats();const nx=$('d_'+item+'_'+(day+1));if(nx)nx.focus()}
@@ -658,7 +637,7 @@ function buildGrids(){
     if(el.id==='savTarget')return;
     el.addEventListener('input',()=>{fmtIncField(el);debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats();if(_pullDone)scheduleCloudPush(SK(curY,curM),350)})});
+    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats();if(_pullDone)void pushDirtyKey(SK(curY,curM),false)})});
   highlightToday()}
 
 function fmtDayCell(el){const n=parseInt(el.value.replace(/\D/g,''))||0;el.value=n>0?n.toLocaleString('vi-VN'):'';el.classList.toggle('has-val',n>0)}
@@ -903,20 +882,28 @@ async function exportHistoryCSV(){if(!_cloudOK){toast('⚠ Chưa cấu hình clo
 
 
 // ═══ INIT ═══
-// Save to cloud shortly after edits; lifecycle events are only a final safety net.
+// Edits save local immediately and cloud shortly after. On returning to the app,
+// cloud is refreshed so desktop/mobile converge on the same current state.
 document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='hidden'){flushCloudBestEffort()}
-  else{void refreshFromCloudQuietly(false)}
+  else{void refreshFromCloudQuietly(true)}
 });
 window.addEventListener('pagehide',()=>{flushCloudBestEffort()});
 window.addEventListener('beforeunload',()=>{flushCloudBestEffort()});
 window.addEventListener('online',()=>{if(_pullDone)void refreshFromCloudQuietly(true);else void autoPull()});
-window.addEventListener('pageshow',e=>{if(e.persisted&&_pullDone)void refreshFromCloudQuietly(true)});
+window.addEventListener('pageshow',()=>{if(_pullDone)void refreshFromCloudQuietly(true)});
+
+// When another tab on the SAME browser changes budget localStorage, refresh UI.
+window.addEventListener('storage',e=>{
+  if(e.key&&isBudgetKey(e.key)){
+    if(curView==='month'){loadMonth();loadTarget();updateStats()}else{renderOverview()}
+    renderTabs()
+  }
+});
 
 document.addEventListener('DOMContentLoaded',async ()=>{
   if(!_storageOK)alert('⚠ localStorage bị chặn.');
-  const testKey='pb_test_'+Date.now();
-  localStorage.setItem(testKey,'ok');
+  const testKey='pb_test_'+Date.now();localStorage.setItem(testKey,'ok');
   if(localStorage.getItem(testKey)==='ok'){localStorage.removeItem(testKey)}
   else{alert('⚠ localStorage không hoạt động!\nData sẽ mất khi đóng trang.')}
 
@@ -924,15 +911,16 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   await autoPull();
   renderTabs();buildGrids();loadMonth();loadTarget();
 
-  // Recovery loop: no network call happens when there are no dirty keys.
-  setInterval(()=>{saveNow();if(_pullDone&&_dirtyKeys.size)void pushAllDirty(false)},30000);
+  // Low-egress safety loop: only pushes when dirty; otherwise refreshes at most once/minute while visible.
+  setInterval(()=>{
+    if(!_pullDone||document.visibilityState!=='visible')return;
+    if(_dirtyKeys.size)void pushAllDirty(false);
+    else void refreshFromCloudQuietly(false)
+  },60000);
 
   document.addEventListener('keydown',e=>{
     if((e.ctrlKey||e.metaKey)&&e.key==='s'){
-      e.preventDefault();
-      saveNow();
-      if(_pullDone)void pushAllDirty(false);
-      toast('✓ Đã lưu local · đang đồng bộ cloud')
+      e.preventDefault();saveNow();if(_pullDone)void pushAllDirty(false);toast('✓ Đã lưu local · đang đồng bộ cloud')
     }
   });
 
