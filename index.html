@@ -106,7 +106,7 @@ body{font-family:'Calibri',Arial,sans-serif;background:var(--bg);color:var(--t);
 <div class="app" id="mainApp">
 
 <div class="hdr">
-  <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--grn);opacity:0;transition:opacity .3s">✓ Đã lưu</span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span></p></div>
+  <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--grn);opacity:0;transition:opacity .3s">✓ Saved</span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span></p></div>
   <div class="hdr-act">
     <select class="yr-s" id="yrS"></select>
     <button class="btn" style="background:var(--bbg);color:var(--blu);font-size:12px" onclick="manualSync()">☁ Sync</button>
@@ -709,7 +709,7 @@ async function exportHistory(){
       if(!r.ok){console.error('History export error:',await r.text());toast('⚠ Export history thất bại — chạy SQL Record History trước');$('syncBadge').textContent='🔴 Lỗi history';$('syncBadge').style.color='var(--pnk)';return false}
       const chunk=await r.json();all.push(...chunk);if(chunk.length<pageSize)break;start+=pageSize;
     }
-    if(!all.length){toast('History đang trống');$('syncBadge').textContent='🟢 Đã tải';$('syncBadge').style.color='var(--grn)';return true}
+    if(!all.length){toast('History đang trống');$('syncBadge').textContent='🟢 Loaded';$('syncBadge').style.color='var(--grn)';return true}
     const header=['HISTORY ID','RECORD ID','ACTION','SAVED AT','SNAPSHOT JSON'];
     const lines=[header.map(csvCell).join(',')];
     all.forEach(h=>{lines.push([h.history_id,h.record_id,h.action,h.created_at,JSON.stringify(h.snapshot)].map(csvCell).join(','))});
@@ -728,12 +728,12 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   initYr();initCharts();
   await autoPull();
   const historyReady=await checkHistoryReady();
-  if(historyReady){$('syncBadge').textContent='🟢 Đã tải · Archive ready';$('syncBadge').style.color='var(--grn)'}
+  if(historyReady){$('syncBadge').textContent='🟢 Loaded · Archive ready';$('syncBadge').style.color='var(--grn)'}
   else if(_cloudOK){$('syncBadge').textContent='🟠 History chưa sẵn sàng';$('syncBadge').style.color='var(--org)'}
   renderTabs();buildGrids();loadMonth();loadTarget();
 
   // Ctrl+S = shortcut lưu vào RAM (chưa lên cloud); muốn sync cloud phải bấm nút ☁ 
-  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Đã lưu tạm (chưa lên cloud — bấm ☁ Sync để đẩy)')}});
+  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();toast('✓ Saved tạm (chưa lên cloud — bấm ☁ Sync để đẩy)')}});
   if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}});
 </script>
 </body>
