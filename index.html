@@ -106,7 +106,7 @@ body{font-family:'Calibri',Arial,sans-serif;background:var(--bg);color:var(--t);
 <div class="app" id="mainApp">
 
 <div class="hdr">
-  <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--grn);opacity:0;transition:opacity .3s">✓ Đã lưu</span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span></p></div>
+  <div><h1>Personal Budget</h1><p>Tracker · <span id="saveStatus" style="font-size:11px;font-weight:600;color:var(--t2);opacity:0;transition:opacity .3s"></span> <span id="syncBadge" style="font-size:11px;font-weight:500;color:var(--t3)"></span></p></div>
   <div class="hdr-act">
     <select class="yr-s" id="yrS"></select>
     <button class="btn" style="background:var(--bbg);color:var(--blu);font-size:12px" onclick="manualSync()">☁ Đồng bộ</button>
@@ -336,42 +336,262 @@ let _saveTimer=null,_storageOK=true;
 try{localStorage.setItem('__t','1');localStorage.removeItem('__t')}catch{_storageOK=false}
 const _cloudOK=SUPABASE_URL.length>5&&SUPABASE_KEY.length>5;
 const _sbBaseH={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
-const _sbH={..._sbBaseH,'Prefer':'return=minimal'};
 const _META_DIRTY='__pb_dirty_keys',_META_VERS='__pb_cloud_versions';
-let _pullDone=false,_historyOK=false,_conflictKeys=new Set();
-let _dirtyKeys=new Set();let _cloudVersions={};
+let _pullDone=false,_historyOK=false,_syncBusy=false,_lastCloudPullAt=0;
+let _conflictKeys=new Set(),_dirtyKeys=new Set(),_cloudVersions={};
+const _pushTimers=new Map(),_pushInFlight=new Map();
+
 try{const x=JSON.parse(localStorage.getItem(_META_DIRTY)||'[]');if(Array.isArray(x))_dirtyKeys=new Set(x)}catch{}
 try{const x=JSON.parse(localStorage.getItem(_META_VERS)||'{}');if(x&&typeof x==='object')_cloudVersions=x}catch{}
+
 function persistSyncMeta(){try{localStorage.setItem(_META_DIRTY,JSON.stringify([..._dirtyKeys]));localStorage.setItem(_META_VERS,JSON.stringify(_cloudVersions))}catch{}}
 function isBudgetKey(k){return /^pb_\d{4}_(?:[0-9]|1[01])$/.test(k)||k==='pb_target_global'}
-function markDirty(k){if(!isBudgetKey(k))return;_dirtyKeys.add(k);persistSyncMeta()}
+function markDirty(k){if(!isBudgetKey(k))return;_dirtyKeys.add(k);persistSyncMeta();refreshSyncBadge()}
 function clearDirty(k){_dirtyKeys.delete(k);_conflictKeys.delete(k);persistSyncMeta()}
 function setCloudVersion(k,v){if(v)_cloudVersions[k]=v;else delete _cloudVersions[k];persistSyncMeta()}
 function setSyncBadge(txt,color){const b=$('syncBadge');if(!b)return;b.textContent=txt;b.style.color=color}
-function refreshSyncBadge(){if(!_cloudOK){setSyncBadge('⚪ Chưa cấu hình cloud','var(--t3)');return}if(_conflictKeys.size){setSyncBadge(`🟠 ${_conflictKeys.size} xung đột · Local được giữ`,'var(--org)');return}if(!_historyOK){setSyncBadge('🟠 History chưa sẵn sàng','var(--org)');return}setSyncBadge('🟢 Đã đồng bộ · Archive ready','var(--grn)')}
+function refreshSyncBadge(){
+  if(!_cloudOK){setSyncBadge('⚪ Chưa cấu hình cloud','var(--t3)');return}
+  if(_conflictKeys.size){setSyncBadge(`🟠 ${_conflictKeys.size} xung đột · Local được giữ`,'var(--org)');return}
+  if(!_historyOK){setSyncBadge('🟠 History chưa sẵn sàng','var(--org)');return}
+  if(_syncBusy||_pushInFlight.size){setSyncBadge('🔄 Đang lưu cloud...','var(--blu)');return}
+  const pending=[..._dirtyKeys].filter(isBudgetKey).length;
+  if(pending){setSyncBadge(`🟡 ${pending} thay đổi chờ cloud`,'var(--org)');return}
+  setSyncBadge('🟢 Cloud synced · Archive ready','var(--grn)')
+}
+function showSaved(msg='✓ Đã lưu local',color='var(--t2)'){const el=$('saveStatus');if(!el)return;el.textContent=msg;el.style.color=color;el.style.opacity='1';clearTimeout(el._t);el._t=setTimeout(()=>{el.style.opacity='0'},1800)}
 function load(y,m){if(!_storageOK)return null;try{return JSON.parse(localStorage.getItem(SK(y,m)))||null}catch{return null}}
-function save(y,m,d){if(!_storageOK)return false;try{const k=SK(y,m),v=JSON.stringify(d),old=localStorage.getItem(k);if(old===v)return false;localStorage.setItem(k,v);markDirty(k);showSaved();return true}catch(e){console.error('Save:',e);return false}}
-function showSaved(){const el=$('saveStatus');if(!el)return;el.style.opacity='1';clearTimeout(el._t);el._t=setTimeout(()=>{el.style.opacity='0'},1800)}
-function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
 function localValueForKey(k){const raw=localStorage.getItem(k);if(raw===null)return null;if(k==='pb_target_global')return raw;try{return JSON.parse(raw)}catch{return null}}
 function sameJson(a,b){try{return JSON.stringify(a)===JSON.stringify(b)}catch{return false}}
+function save(y,m,d){
+  if(!_storageOK)return false;
+  try{
+    const k=SK(y,m),v=JSON.stringify(d),old=localStorage.getItem(k);
+    if(old===v)return false;
+    localStorage.setItem(k,v);
+    markDirty(k);
+    showSaved('✓ Đã lưu local','var(--t2)');
+    if(_pullDone)scheduleCloudPush(k,1100);
+    return true
+  }catch(e){console.error('Save:',e);return false}
+}
+function debounceSave(){clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{saveNow();updateStats()},300)}
+function stashRecovery(k,v){try{localStorage.setItem('__pb_recovery_'+k,JSON.stringify({saved_at:new Date().toISOString(),data:v}))}catch{}}
 
-// ═══ SUPABASE CLOUD SYNC · SAFE PER-ROW ═══
-async function checkHistoryReady(){if(!_cloudOK)return false;try{const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_history_ready',{method:'POST',headers:_sbBaseH,body:'{}'});if(!r.ok)return false;const x=await r.json();return x===true||(Array.isArray(x)&&x[0]===true)}catch{return false}}
-async function fetchCloudRows(){const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?select=id,data,updated_at&order=id.asc',{headers:_sbBaseH});if(!r.ok)throw new Error('Cloud read '+r.status);return await r.json()}
-function applyCloudRows(rows){let conflicts=0;for(const row of rows){const k=row.id;if(!isBudgetKey(k))continue;const cloudVer=row.updated_at||null,base=_cloudVersions[k]||null,local=localValueForKey(k),dirty=_dirtyKeys.has(k);
-    if(dirty){if((base&&cloudVer!==base)||(!base&&cloudVer&&!sameJson(local,row.data))){_conflictKeys.add(k);conflicts++;continue}if(!base&&sameJson(local,row.data)){setCloudVersion(k,cloudVer);clearDirty(k);continue}continue}
-    if(!base&&local!==null&&!sameJson(local,row.data)){_dirtyKeys.add(k);_conflictKeys.add(k);setCloudVersion(k,cloudVer);conflicts++;continue}
-    localStorage.setItem(k,typeof row.data==='string'?row.data:JSON.stringify(row.data));setCloudVersion(k,cloudVer);_conflictKeys.delete(k)}persistSyncMeta();return conflicts}
-async function autoPull(){if(!_cloudOK)return;setSyncBadge('🔄 Đang tải...','var(--blu)');try{_historyOK=await checkHistoryReady();const rows=await fetchCloudRows();applyCloudRows(rows);_pullDone=true;buildGrids();loadMonth();loadTarget();renderTabs();refreshSyncBadge()}catch(e){setSyncBadge('🔴 Offline','var(--pnk)');console.error(e)}}
-async function pushDirtyKey(k,keepalive=false){if(!_cloudOK||!_pullDone||!_historyOK||!_dirtyKeys.has(k)||_conflictKeys.has(k))return false;const d=localValueForKey(k);if(d===null)return false;try{const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_safe_save',{method:'POST',keepalive,headers:_sbBaseH,body:JSON.stringify({p_id:k,p_data:d,p_expected_updated_at:_cloudVersions[k]||null})});if(!r.ok){console.error('Cloud save',r.status,await r.text());setSyncBadge('🔴 Lỗi lưu cloud','var(--pnk)');return false}const x=await r.json();const row=Array.isArray(x)?x[0]:x;if(!row||row.conflict){_conflictKeys.add(k);persistSyncMeta();refreshSyncBadge();toast('⚠ Cloud đã thay đổi trên thiết bị khác. Local được giữ, không ghi đè.');return false}if(row.success){setCloudVersion(k,row.new_updated_at);clearDirty(k);refreshSyncBadge();return true}return false}catch(e){console.error(e);setSyncBadge('🔴 Offline','var(--pnk)');return false}}
-async function pushAllDirty(keepalive=false){const keys=[..._dirtyKeys].filter(isBudgetKey);let ok=0;for(const k of keys){if(await pushDirtyKey(k,keepalive))ok++}return ok}
-function autoPush(){if(!_cloudOK||!_pullDone)return;saveNow();void pushAllDirty(true)}
-async function manualSync(){if(!_cloudOK){toast('⚠ Chưa cấu hình');return}saveNow();toast('🔄 Đang đồng bộ...');setSyncBadge('🔄 Đang đồng bộ...','var(--blu)');try{_historyOK=await checkHistoryReady();if(!_historyOK){refreshSyncBadge();toast('⚠ History chưa sẵn sàng. Không ghi cloud.');return}const rows=await fetchCloudRows();const conflicts=applyCloudRows(rows);_pullDone=true;await pushAllDirty(false);buildGrids();loadMonth();loadTarget();renderTabs();refreshSyncBadge();if(conflicts||_conflictKeys.size)toast('⚠ Có xung đột. Local được giữ, không ghi đè cloud.');else toast('✓ Đã đồng bộ + lưu History')}catch(e){setSyncBadge('🔴 Offline','var(--pnk)');toast('⚠ Offline');console.error(e)}}
+// ═══ SUPABASE CLOUD SYNC · SAFE + COALESCED ═══
+async function checkHistoryReady(){
+  if(!_cloudOK)return false;
+  try{
+    const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_history_ready',{method:'POST',headers:_sbBaseH,body:'{}'});
+    if(!r.ok)return false;
+    const x=await r.json();
+    return x===true||(Array.isArray(x)&&x[0]===true)
+  }catch{return false}
+}
+
+async function fetchCloudRows(){
+  const r=await fetch(SUPABASE_URL+'/rest/v1/budget_data?select=id,data,updated_at&order=id.asc',{headers:_sbBaseH,cache:'no-store'});
+  if(!r.ok)throw new Error('Cloud read '+r.status);
+  return await r.json()
+}
+
+function applyCloudRows(rows){
+  let conflicts=0;
+  for(const row of rows){
+    const k=row.id;
+    if(!isBudgetKey(k))continue;
+    const cloudVer=row.updated_at||null;
+    const base=_cloudVersions[k]||null;
+    const local=localValueForKey(k);
+    const dirty=_dirtyKeys.has(k);
+
+    // First trusted baseline on this browser: CLOUD is master.
+    // If old local data exists from a pre-safe version, keep one recovery copy
+    // but do not create a fake conflict.
+    if(!base){
+      if(dirty&&local!==null&&!sameJson(local,row.data))stashRecovery(k,local);
+      localStorage.setItem(k,typeof row.data==='string'?row.data:JSON.stringify(row.data));
+      setCloudVersion(k,cloudVer);
+      clearDirty(k);
+      continue
+    }
+
+    // Local has unsynced edits based on a known cloud version.
+    if(dirty){
+      if(cloudVer!==base){
+        _conflictKeys.add(k);
+        conflicts++;
+      }
+      // If cloud version is unchanged, keep local and push it afterwards.
+      continue
+    }
+
+    // Clean local: always refresh from cloud.
+    localStorage.setItem(k,typeof row.data==='string'?row.data:JSON.stringify(row.data));
+    setCloudVersion(k,cloudVer);
+    _conflictKeys.delete(k)
+  }
+  persistSyncMeta();
+  return conflicts
+}
+
+function scheduleCloudPush(k,delay=1100){
+  if(!_pullDone||!_cloudOK||!_historyOK||!isBudgetKey(k)||_conflictKeys.has(k))return;
+  const old=_pushTimers.get(k);if(old)clearTimeout(old);
+  const t=setTimeout(()=>{_pushTimers.delete(k);void pushDirtyKey(k,false)},delay);
+  _pushTimers.set(k,t)
+}
+
+async function _doPushDirtyKey(k,keepalive=false){
+  if(!_cloudOK||!_pullDone||!_historyOK||!_dirtyKeys.has(k)||_conflictKeys.has(k))return false;
+  const sentData=localValueForKey(k);
+  if(sentData===null)return false;
+  const expected=_cloudVersions[k]||null;
+  refreshSyncBadge();
+
+  try{
+    const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/budget_safe_save',{
+      method:'POST',
+      keepalive,
+      headers:_sbBaseH,
+      body:JSON.stringify({p_id:k,p_data:sentData,p_expected_updated_at:expected})
+    });
+
+    if(!r.ok){
+      console.error('Cloud save',r.status,await r.text());
+      setSyncBadge('🔴 Lỗi lưu cloud','var(--pnk)');
+      return false
+    }
+
+    const x=await r.json();
+    const row=Array.isArray(x)?x[0]:x;
+
+    if(!row||row.conflict){
+      _conflictKeys.add(k);
+      persistSyncMeta();
+      refreshSyncBadge();
+      toast('⚠ Cloud đã thay đổi trên thiết bị khác. Local được giữ, không ghi đè.');
+      return false
+    }
+
+    if(row.success){
+      setCloudVersion(k,row.new_updated_at);
+
+      // If the user edited again while this request was in flight,
+      // keep the key dirty and immediately queue one more save.
+      if(sameJson(localValueForKey(k),sentData)){
+        clearDirty(k);
+        showSaved('☁ Đã lưu cloud','var(--grn)')
+      }else{
+        _dirtyKeys.add(k);
+        persistSyncMeta();
+        if(!keepalive)scheduleCloudPush(k,250)
+      }
+      refreshSyncBadge();
+      return true
+    }
+    return false
+  }catch(e){
+    console.error(e);
+    setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');
+    return false
+  }
+}
+
+async function pushDirtyKey(k,keepalive=false){
+  if(_pushInFlight.has(k)){
+    try{await _pushInFlight.get(k)}catch{}
+    if(_dirtyKeys.has(k)&&!_conflictKeys.has(k)&&!keepalive)return pushDirtyKey(k,false);
+    return !_dirtyKeys.has(k)
+  }
+  const p=_doPushDirtyKey(k,keepalive);
+  _pushInFlight.set(k,p);
+  try{return await p}
+  finally{
+    _pushInFlight.delete(k);
+    refreshSyncBadge();
+    if(_dirtyKeys.has(k)&&!_conflictKeys.has(k)&&!keepalive)scheduleCloudPush(k,250)
+  }
+}
+
+async function pushAllDirty(keepalive=false){
+  const keys=[..._dirtyKeys].filter(isBudgetKey);
+  let ok=0;
+  for(const k of keys){if(await pushDirtyKey(k,keepalive))ok++}
+  return ok
+}
+
+function flushCloudBestEffort(){
+  if(!_cloudOK||!_pullDone||!_historyOK)return;
+  saveNow();
+  for(const k of [..._dirtyKeys].filter(isBudgetKey))void pushDirtyKey(k,true)
+}
+
+async function autoPull(){
+  if(!_cloudOK)return;
+  _syncBusy=true;
+  setSyncBadge('🔄 Đang tải cloud...','var(--blu)');
+  try{
+    _historyOK=await checkHistoryReady();
+    if(!_historyOK){_pullDone=false;refreshSyncBadge();return}
+    const rows=await fetchCloudRows();
+    applyCloudRows(rows);
+    _lastCloudPullAt=Date.now();
+    _pullDone=true;
+    await pushAllDirty(false);
+    buildGrids();loadMonth();loadTarget();renderTabs();
+    refreshSyncBadge()
+  }catch(e){
+    setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');
+    console.error(e)
+  }finally{_syncBusy=false;refreshSyncBadge()}
+}
+
+async function refreshFromCloudQuietly(force=false){
+  if(!_cloudOK||!_pullDone||_syncBusy||_pushInFlight.size)return;
+  if(!force&&Date.now()-_lastCloudPullAt<10000)return;
+  _syncBusy=true;
+  try{
+    _historyOK=await checkHistoryReady();
+    if(!_historyOK){refreshSyncBadge();return}
+    const rows=await fetchCloudRows();
+    applyCloudRows(rows);
+    _lastCloudPullAt=Date.now();
+    await pushAllDirty(false);
+    if(curView==='month'){buildGrids();loadMonth();loadTarget()}else{renderOverview()}
+    renderTabs()
+  }catch(e){console.error(e)}
+  finally{_syncBusy=false;refreshSyncBadge()}
+}
+
+async function manualSync(){
+  if(!_cloudOK){toast('⚠ Chưa cấu hình');return}
+  saveNow();
+  toast('🔄 Đang đồng bộ...');
+  _syncBusy=true;
+  setSyncBadge('🔄 Đang đồng bộ...','var(--blu)');
+  try{
+    if(_pushInFlight.size)await Promise.allSettled([..._pushInFlight.values()]);
+    _historyOK=await checkHistoryReady();
+    if(!_historyOK){toast('⚠ History chưa sẵn sàng. Không ghi cloud.');return}
+    const rows=await fetchCloudRows();
+    const conflicts=applyCloudRows(rows);
+    _lastCloudPullAt=Date.now();
+    _pullDone=true;
+    await pushAllDirty(false);
+    buildGrids();loadMonth();loadTarget();renderTabs();
+    if(conflicts||_conflictKeys.size)toast('⚠ Có xung đột thật. Local được giữ, cloud không bị ghi đè.');
+    else toast('✓ Cloud đã cập nhật + History đã lưu')
+  }catch(e){
+    setSyncBadge('🔴 Offline · Local vẫn còn','var(--pnk)');
+    toast('⚠ Offline');
+    console.error(e)
+  }finally{_syncBusy=false;refreshSyncBadge()}
+}
 
 // ═══ SAVINGS TARGET ═══
 function getTarget(){return parseFloat($('savTarget').value)||0}
-let _targetPushTimer=null;function saveTarget(){const k='pb_target_global',v=String(getTarget()),old=localStorage.getItem(k);if(old!==v){localStorage.setItem(k,v);markDirty(k);showSaved()}clearTimeout(_targetPushTimer);_targetPushTimer=setTimeout(()=>{if(_pullDone)void pushDirtyKey(k)},500)}
+let _targetPushTimer=null;function saveTarget(){const k='pb_target_global',v=String(getTarget()),old=localStorage.getItem(k);if(old!==v){localStorage.setItem(k,v);markDirty(k);showSaved('✓ Đã lưu local','var(--t2)')}clearTimeout(_targetPushTimer);_targetPushTimer=setTimeout(()=>{if(_pullDone)scheduleCloudPush(k,450)},450)}
 function loadTarget(){const v=parseFloat(localStorage.getItem('pb_target_global'))||0;$('savTarget').value=v>0?v:''}
 
 function updateTargetUI(inc,exp){
@@ -388,7 +608,7 @@ function updateTargetUI(inc,exp){
 // ═══ YEAR / TABS ═══
 let curView='month'; // 'month' | 'overview'
 
-function initYr(){const s=$('yrS');s.innerHTML='';for(let y=2026;y<=2030;y++){const o=document.createElement('option');o.value=y;o.textContent=y;if(y===curY)o.selected=true;s.appendChild(o)}
+function initYr(){const s=$('yrS');s.innerHTML='';for(let y=2026;y<=2100;y++){const o=document.createElement('option');o.value=y;o.textContent=y;if(y===curY)o.selected=true;s.appendChild(o)}
 s.onchange=()=>{saveNow();curY=+s.value;renderTabs();if(curView==='month'){buildGrids();loadMonth();loadTarget()}else{renderOverview()}}}
 
 function switchView(v){
@@ -425,7 +645,7 @@ function buildGrids(){
   document.querySelectorAll('.dc').forEach(el=>{
     el.addEventListener('input',()=>{debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats();if(_pullDone)autoPush()});
+    el.addEventListener('blur',()=>{fmtDayCell(el);saveNow();updateStats();if(_pullDone)scheduleCloudPush(SK(curY,curM),350)});
     el.addEventListener('keydown',e=>{
       const item=el.dataset.item,day=+el.dataset.day;
       if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();fmtDayCell(el);saveNow();updateStats();const nx=$('d_'+item+'_'+(day+1));if(nx)nx.focus()}
@@ -438,7 +658,7 @@ function buildGrids(){
     if(el.id==='savTarget')return;
     el.addEventListener('input',()=>{fmtIncField(el);debounceSave()});
     el.addEventListener('focus',()=>{const r=el.value.replace(/\D/g,'');el.value=r==='0'?'':r});
-    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats();if(_pullDone)autoPush()})});
+    el.addEventListener('blur',()=>{fmtIncField(el);saveNow();updateStats();if(_pullDone)scheduleCloudPush(SK(curY,curM),350)})});
   highlightToday()}
 
 function fmtDayCell(el){const n=parseInt(el.value.replace(/\D/g,''))||0;el.value=n>0?n.toLocaleString('vi-VN'):'';el.classList.toggle('has-val',n>0)}
@@ -670,7 +890,7 @@ function renderOverview(){
 function copyMonth(){const src=prompt('Sao chép từ tháng nào? (1-12)');if(!src)return;
   const sm=parseInt(src)-1;if(isNaN(sm)||sm<0||sm>11||sm===curM){toast('Không hợp lệ');return}
   const sd=load(curY,sm);if(!sd){toast('Tháng nguồn trống');return}
-  save(curY,curM,JSON.parse(JSON.stringify(sd)));buildGrids();loadMonth();renderTabs();if(_pullDone)void pushDirtyKey(SK(curY,curM));toast(`Đã sao chép từ ${MONTHS[sm]}`)}
+  save(curY,curM,JSON.parse(JSON.stringify(sd)));buildGrids();loadMonth();renderTabs();if(_pullDone)scheduleCloudPush(SK(curY,curM),250);toast(`Đã sao chép từ ${MONTHS[sm]}`)}
 
 function exportCSV(){const hdr=['Tháng','Lương','Thưởng','Hoa hồng','TỔNG THU',...CATS.map(c=>c.vi),'TỔNG CHI','TIẾT KIỆM','TỶ LỆ'];
   const rows=[hdr.join(',')];for(let m=0;m<12;m++){const md=load(curY,m)||{income:{},expenses:{}};
@@ -683,11 +903,15 @@ async function exportHistoryCSV(){if(!_cloudOK){toast('⚠ Chưa cấu hình clo
 
 
 // ═══ INIT ═══
-// Auto-push when closing tab / switching app / locking phone
-document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveNow();autoPush()}});
-window.addEventListener('beforeunload',()=>{saveNow();autoPush()});
-// Also push when phone goes to sleep (pagehide is more reliable on mobile)
-window.addEventListener('pagehide',()=>{saveNow();autoPush()});
+// Save to cloud shortly after edits; lifecycle events are only a final safety net.
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='hidden'){flushCloudBestEffort()}
+  else{void refreshFromCloudQuietly(false)}
+});
+window.addEventListener('pagehide',()=>{flushCloudBestEffort()});
+window.addEventListener('beforeunload',()=>{flushCloudBestEffort()});
+window.addEventListener('online',()=>{if(_pullDone)void refreshFromCloudQuietly(true);else void autoPull()});
+window.addEventListener('pageshow',e=>{if(e.persisted&&_pullDone)void refreshFromCloudQuietly(true)});
 
 document.addEventListener('DOMContentLoaded',async ()=>{
   if(!_storageOK)alert('⚠ localStorage bị chặn.');
@@ -695,15 +919,25 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   localStorage.setItem(testKey,'ok');
   if(localStorage.getItem(testKey)==='ok'){localStorage.removeItem(testKey)}
   else{alert('⚠ localStorage không hoạt động!\nData sẽ mất khi đóng trang.')}
-  
-  // Auto-pull from cloud first (so we get latest data from other device)
+
   initYr();initCharts();
   await autoPull();
   renderTabs();buildGrids();loadMonth();loadTarget();
-  
-  setInterval(()=>{saveNow();if(_pullDone)void pushDirtyKey(SK(curY,curM))},60000);
-  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveNow();if(_pullDone)void pushAllDirty(false);toast('✓ Đã lưu local · đang đồng bộ')}});
-  if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}});
+
+  // Recovery loop: no network call happens when there are no dirty keys.
+  setInterval(()=>{saveNow();if(_pullDone&&_dirtyKeys.size)void pushAllDirty(false)},30000);
+
+  document.addEventListener('keydown',e=>{
+    if((e.ctrlKey||e.metaKey)&&e.key==='s'){
+      e.preventDefault();
+      saveNow();
+      if(_pullDone)void pushAllDirty(false);
+      toast('✓ Đã lưu local · đang đồng bộ cloud')
+    }
+  });
+
+  if(!_cloudOK){$('syncBadge').textContent='⚪ Chưa cấu hình cloud'}
+});
 </script>
 </body>
 </html>
